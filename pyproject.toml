@@ -1,0 +1,11 @@
+[project]
+name = "LightingControl"
+version = "0.1.0"
+description = "Control multiple lights using Shelly smart switches"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "astral>=3.2",
+    "pytz>=2025.2",
+    "sc-utility>=2.1.3",
+]

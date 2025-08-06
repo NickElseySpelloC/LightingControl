@@ -1,0 +1,108 @@
+# This is the configuration file for the LightingControl utility 
+
+General:
+  # The name of the application
+  AppName: My Home Lights
+  # Number of seconds to wait before checking the schedules again
+  CheckInterval: 60
+  # Optional: Base URL for the PowerControllerViewer website to post state information to
+  WebsiteBaseURL: http://127.0.0.1:8000
+  # The PowerControllerViewer access key, if required
+  WebsiteAccessKey: 
+  # Timeout for website requests in seconds
+  WebsiteTimeout: 5
+
+
+# Use this section to configure your Shelly devices used to control the lights
+# See this page for more information: https://nickelseyspelloc.github.io/sc_utility/guide/shelly_control/
+ShellyDevices:
+  ResponseTimeout: 3
+  RetryCount: 1
+  RetryDelay: 2
+  PingAllowed: True
+  Devices:
+    - Name: Downstairs Lights
+      Model: Shelly2PMG3
+      Simulate: False
+      Outputs:
+        - Name: "Living Room"
+        - Name: "Kitchen"
+    - Name: Outside Lights
+      Model: Shelly2PMG3
+      Simulate: False
+      Outputs:
+        - Name: "Patio"
+          Group: External Lights
+        - Name: "Driveway"
+          Group: Nighttime
+
+
+# Use this section to configure the location of your home so that we can caculate sunrise and sunset times
+# Specify the latitude and longitude of your home or use the Google Maps URL which includes the coordinates
+Location:
+  Name: Rome
+  Timezone: Europe/Rome
+  GoogleMapsURL: https://www.google.com/maps/place/Rome,+Metropolitan+City+of+Rome+Capital/@41.9099533,12.3711975,101027m
+  Latitude: 
+  Longitude: 
+
+
+# Define one or more schedules for controlling the lights
+Schedules:
+  - Name: Inside Lighting
+    Events: 
+      - TurnOn: "07:00"
+        TurnOff: "09:30"
+        DaysOfWeek: Mon,Tue,Wed,Thu,Fri
+      - TurnOn: "20:00"
+        TurnOff: "23:00"
+        DaysOfWeek: All
+  - Name: Dusk to Dawn
+    Events: 
+      - TurnOn: Dusk
+        TurnOff: Dawn-01:00
+        RandomOffset: 30
+        DaysOfWeek: Sat,Sun,Tue
+        DatesOff: 
+        - StartDate: 2025-09-01
+          EndDate: 2025-09-10
+  
+# Maps the schedules to switches and switch groups
+LightingControl:
+  - Type: Default
+    Schedule: Inside Lighting
+  - Type: Switch Group
+    Target: External Lights
+    Schedule: Dusk to Dawn
+
+
+Files:
+  # The name of the saved state file. This is used to store the state of the device between runs.
+  SavedStateFile: system_state.json
+  LogfileName: logfile.log
+  LogfileMaxLines: 5000
+  # How much information do we write to the log file. One of: none; error; warning; summary; detailed; debug
+  LogfileVerbosity: detailed
+  # How much information do we write to the console. One of: error; warning; summary; detailed; debug
+  ConsoleVerbosity: detailed
+  # The state file keeps a log of the switch state changes. This option controls how many days of history we keep. Defaults to 30 days.
+  MaxDaysSwitchChangeHistory: 14
+
+
+# Enter your settings here if you want to be emailed when there's a critical error 
+Email:
+  EnableEmail: True
+  SendEmailsTo: <Your email address here>
+  SMTPServer: <Your SMTP server here>
+  SMTPPort: 587
+  SMTPUsername: <Your SMTP username here>
+  SMTPPassword: <Your SMTP password here>
+  SubjectPrefix: 
+
+
+# Optionally configure a heartbeat monitor to check the availability of a website - using BetterStack uptime
+HeartbeatMonitor:
+  # The URL of the website to monitor for availability
+  WebsiteURL: https://uptime.betterstack.com/api/v1/heartbeat/myheatbeatid
+  # How long to wait for a response from the website before considering it down in seconds
+  HeartbeatTimeout: 5
