@@ -28,6 +28,7 @@ class LightingController:
         self.offset_cache = {}
         self.switch_states = []  # The current state of each switch
         self.switch_events = []  # List of switch change events for logging purposes. This is a list of days, and for each day, a list of events with the time, switch identifier and state change.
+        self.config_last_check = DateHelper.now()  # Last time the config file was checked for changes
         self._initialise()
 
     def _initialise(self):
@@ -217,14 +218,22 @@ class LightingController:
                 response.raise_for_status()
                 self.logger.log_message(f"Posted LightingController state to {api_url}", "debug")
             except requests.exceptions.HTTPError as e:
+                try:
+                    returned_json = response.json()
+                except (ValueError, requests.exceptions.JSONDecodeError):
+                    returned_json = response.text if hasattr(response, "text") else "No response content"
                 if response.status_code == HTTP_STATUS_FORBIDDEN:  # Handle 403 Forbidden error
-                    self.logger.log_message(f"Access denied ({HTTP_STATUS_FORBIDDEN} Forbidden) when posting to {api_url}. Check your access key or permissions.", "error")
+                    self.logger.log_message(f"Access denied ({HTTP_STATUS_FORBIDDEN} Forbidden) when posting to {api_url}. Check your access key or permissions. Error: {e}, Response: {returned_json}", "error")
                 else:
-                    self.logger.log_message(f"HTTP error saving state to web server at {api_url}: {e}", "warning")
+                    self.logger.log_message(f"HTTP error saving state to web server at {api_url}: Error: {e}, Response: {returned_json}", "warning")
             except requests.exceptions.ConnectionError as e:  # Trap connection error - ConnectionError
-                self.logger.log_message(f"Web server at {api_url} is unavailable. Error was: {e}", "warning")
+                self.logger.log_message(f"Web server at {api_url} is unavailable. Error: {e}", "warning")
             except requests.exceptions.RequestException as e:
-                self.logger.log_fatal_error(f"Error saving state to web server at {api_url}: {e}")
+                try:
+                    returned_json = response.json()
+                except (ValueError, requests.exceptions.JSONDecodeError):
+                    returned_json = response.text if hasattr(response, "text") else "No response content"
+                self.logger.log_fatal_error(f"Error saving state to web server at {api_url}: Error: {e}, Response: {returned_json}")
 
     def _trim_switch_events(self):
         """Trim the switch events to keep only the last N days of history. Also sorts the events by date and time."""
@@ -553,12 +562,42 @@ class LightingController:
         assert self.check_interval > 0, "CheckInterval must be a positive integer"
 
         while True:
-            if self.config.check_for_config_changes():
-                self.logger.log_message("Configuration file changed, reloading...", "detailed")
-                self._initialise()
+            config_timestamp = self.config.check_for_config_changes(self.config_last_check)
+            if config_timestamp:
+                self.reload_config()
 
             self.evaluate_switch_states()
             self.change_switch_states()
             self._save_state()  # Save the latest state to the file including any switch change events
             time.sleep(self.check_interval)
             self.ping_heatbeat()
+
+    def reload_config(self):
+        """Apply the updated configureation settings ."""
+        self.logger.log_message("Reloading configuration...", "detailed")
+
+        try:
+            # First update the logger
+            logger_settings = self.config.get_logger_settings()
+            self.logger.initialise_settings(logger_settings)
+
+            # Then email settings
+            email_settings = self.config.get_email_settings()
+            if email_settings:
+                self.logger.register_email_settings(email_settings)
+
+            # And finally reinitialise the shelly switches
+            shelly_settings = self.config.get_shelly_settings()
+            if shelly_settings is None:
+                self.logger.log_fatal_error("No Shelly settings found in the configuration file.")
+                return
+            # assert isinstance(shelly_settings, dict)
+            self.shelly_control.initialize_settings(device_settings=shelly_settings, refresh_status=True)
+
+        except RuntimeError as e:
+            self.logger.log_fatal_error(f"Error reloading and applying configuration changes: {e}")
+            return
+        else:
+            # Finally, re-initialise ourselves
+            self._initialise()
+            self.config_last_check = DateHelper.now()

@@ -154,6 +154,7 @@ class ConfigSchema:
                 "schema": {
                     "SavedStateFile": {"type": "string", "required": True},
                     "LogfileName": {"type": "string", "required": False, "nullable": True},
+                    "LogProcessID": {"type": "boolean", "required": False, "nullable": True},
                     "LogfileMaxLines": {"type": "number", "required": False, "nullable": True, "min": 0, "max": 100000},
                     "LogfileVerbosity": {"type": "string", "required": True, "allowed": ["none", "error", "warning", "summary", "detailed", "debug", "all"]},
                     "ConsoleVerbosity": {"type": "string", "required": True, "allowed": ["error", "warning", "summary", "detailed", "debug"]},

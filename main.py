@@ -27,14 +27,14 @@ def main():
         )
     except RuntimeError as e:
         print(f"Configuration file error: {e}", file=sys.stderr)
-        return
+        sys.exit(1)     # Exit with errorcode 1 so that launch.sh can detect it
 
     # Initialize the SC_Logger class
     try:
         logger = SCLogger(config.get_logger_settings())
     except RuntimeError as e:
         print(f"Logger initialisation error: {e}", file=sys.stderr)
-        return
+        sys.exit(1)     # Exit with errorcode 1 so that launch.sh can detect it
 
     # Setup email
     email_settings = config.get_email_settings()
