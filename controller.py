@@ -1,3 +1,4 @@
+from post_state_to_web_server import post_state_to_web_server
 import copy
 import datetime as dt
 import json
@@ -14,7 +15,6 @@ from astral.sun import sun
 from sc_utility import DateHelper, SCCommon, SCConfigManager, SCLogger, ShellyControl
 
 WEEKDAY_ABBREVIATIONS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-HTTP_STATUS_FORBIDDEN = 403
 
 
 class LightingController:
@@ -199,41 +199,7 @@ class LightingController:
             self.logger.log_fatal_error(f"Failed to save state file: {e}")
 
         # Now if the WebsiteBaseURL has been set, save the state to the web server
-        base_url = self.config.get("General", "WebsiteBaseURL", default=None)
-        access_key = self.config.get("General", "WebsiteAccessKey")
-        timeout_wait = self.config.get("General", "WebsiteTimeout", default=5)
-        if base_url:
-            api_url = base_url + "/api/submit"  # type: ignore[attr-defined]
-
-            if access_key:
-                api_url += f"?key={access_key}"  # Add access_key as a query parameter
-
-            headers = {
-                "Content-Type": "application/json",
-            }
-            json_object = state_data
-
-            try:
-                response = requests.post(api_url, headers=headers, json=json_object, timeout=timeout_wait)  # type: ignore[attr-defined]
-                response.raise_for_status()
-                self.logger.log_message(f"Posted LightingController state to {api_url}", "debug")
-            except requests.exceptions.HTTPError as e:
-                try:
-                    returned_json = response.json()
-                except (ValueError, requests.exceptions.JSONDecodeError):
-                    returned_json = response.text if hasattr(response, "text") else "No response content"
-                if response.status_code == HTTP_STATUS_FORBIDDEN:  # Handle 403 Forbidden error
-                    self.logger.log_message(f"Access denied ({HTTP_STATUS_FORBIDDEN} Forbidden) when posting to {api_url}. Check your access key or permissions. Error: {e}, Response: {returned_json}", "error")
-                else:
-                    self.logger.log_message(f"HTTP error saving state to web server at {api_url}: Error: {e}, Response: {returned_json}", "warning")
-            except requests.exceptions.ConnectionError as e:  # Trap connection error - ConnectionError
-                self.logger.log_message(f"Web server at {api_url} is unavailable. Error: {e}", "warning")
-            except requests.exceptions.RequestException as e:
-                try:
-                    returned_json = response.json()
-                except (ValueError, requests.exceptions.JSONDecodeError):
-                    returned_json = response.text if hasattr(response, "text") else "No response content"
-                self.logger.log_fatal_error(f"Error saving state to web server at {api_url}: Error: {e}, Response: {returned_json}")
+        post_state_to_web_server(self.config, self.logger, state_data)
 
     def _trim_switch_events(self):
         """Trim the switch events to keep only the last N days of history. Also sorts the events by date and time."""
