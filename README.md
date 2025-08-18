@@ -60,12 +60,18 @@ ShellyDevices:
     - Name: Downstairs Lights
       Model: Shelly2PMG3
       Simulate: False
+      Inputs:
+        - Name: "Living Room Input"
+        - Name: "Kitchen Input"
       Outputs:
         - Name: "Living Room"
         - Name: "Kitchen"
     - Name: Outside Lights
       Model: Shelly2PMG3
       Simulate: False
+      Inputs:
+        - Name: "Outside Switch"
+        - Name: "Unused 1"
       Outputs:
         - Name: "Patio"
           Group: External Lights
@@ -110,6 +116,19 @@ LightingControl:
   - Type: Switch Group
     Target: External Lights
     Schedule: Dusk to Dawn
+
+# Optional. Map Shelly inputs to lighting control actions. If an input is mapped to a switch or switch group 
+# then the lights in that target will be On when the input is on, regardless of the schedule 
+InputControls:
+  - Type: Switch   
+    Target: Living Room
+    Input: Living Room Input
+  - Type: Switch   
+    Target: Kitchen
+    Input: Kitchen Input
+  - Type: Switch Group
+    Target: External Lights
+    Input: Outside Switch
 
 
 Files:
@@ -202,6 +221,17 @@ Maps the schedules to switches and switch groups. You can have any number of ent
 | Type | One of:<br>- Default: Schedule applies to all switches and switch groups not exlictly mapped to schedule elsewhere in this section.<br>- Switch: Map a schedule to a specific switch.<br>- Switch Group: Map a schedule to a specific switch group. |
 | Target | The target for this mapping. If Type is Default, leave blank. If Type is Switch, then enter the name of the switch (as defined in ShellyDevices: Devices: Outputs: Name). If Type is Switch Group, then enter the name of the switch group (as defined in ShellyDevices: Devices: Outputs: Group). |
 | Schedule | The schedule (as defined in the Schedules section) to map to the default, switch or switch group. |
+
+### Section: InputControls
+
+Optionally map a Shelly relay input to a switch, switch group or all outputs by default. This can be used to over-ride the schedule and turn the lights on regardless. To use this feature you must set the relay type for the Shelly switch to "Detached" switch mode (Settings > Input/output settings in the app)
+
+| Parameter | Description | 
+|:--|:--|
+| Type | One of:<br>- Default: Input controls all switches and switch groups not exlictly mapped to schedule elsewhere in this section. You don't need to have a default. <br>- Switch: Map an input to a specific switch.<br>- Switch Group: Map an input to a specific switch group. |
+| Target | The target for this mapping. If Type is Default, leave blank. If Type is Switch, then enter the name of the switch (as defined in ShellyDevices: Devices: Outputs: Name). If Type is Switch Group, then enter the name of the switch group (as defined in ShellyDevices: Devices: Outputs: Group). |
+| Input | The input (as defined in ShellyDevices: Devices: Inputs: Name) to map to the default, switch or switch group. |
+
 
 ### Section: Files
 

@@ -143,9 +143,22 @@ class ConfigSchema:
                 "schema": {
                     "type": "dict",
                     "schema": {
-                        "Type": {"type": "string", "required": True},
+                        "Type": {"type": "string", "required": True, "allowed": ["Default", "Switch", "Switch Group"]},
                         "Target": {"type": "string", "required": False, "nullable": True},
                         "Schedule": {"type": "string", "required": True},
+                    },
+                },
+            },
+            "InputControls": {
+                "type": "list",
+                "required": False,
+                "nullable": True,
+                "schema": {
+                    "type": "dict",
+                    "schema": {
+                        "Type": {"type": "string", "required": True, "allowed": ["Default", "Switch", "Switch Group"]},
+                        "Target": {"type": "string", "required": False, "nullable": True},
+                        "Input": {"type": "string", "required": True},
                     },
                 },
             },

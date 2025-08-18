@@ -2,13 +2,19 @@ import requests
 
 HTTP_STATUS_FORBIDDEN = 403
 
-def post_state_to_web_server(config, logger, state_data):
+
+def post_state_to_web_server(config, logger, state_data, config_section: str | None = "General"):
+    """Post the LightingController state to the web server if WebsiteBaseURL is set in config.
+
+    Args:
+        config: The configuration manager instance.
+        logger: The logger instance for logging messages.
+        state_data: The state data to be posted.
+        config_section: The configuration section to use (default is "General").
     """
-    Post the LightingController state to the web server if WebsiteBaseURL is set in config.
-    """
-    base_url = config.get("General", "WebsiteBaseURL", default=None)
-    access_key = config.get("General", "WebsiteAccessKey")
-    timeout_wait = config.get("General", "WebsiteTimeout", default=5)
+    base_url = config.get(config_section, "WebsiteBaseURL", default=None)
+    access_key = config.get(config_section, "WebsiteAccessKey")
+    timeout_wait = config.get(config_section, "WebsiteTimeout", default=5)
     if base_url:
         api_url = base_url + "/api/submit"
         if access_key:

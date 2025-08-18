@@ -1,4 +1,3 @@
-from post_state_to_web_server import post_state_to_web_server
 import copy
 import datetime as dt
 import json
@@ -14,6 +13,8 @@ from astral import LocationInfo
 from astral.sun import sun
 from sc_utility import DateHelper, SCCommon, SCConfigManager, SCLogger, ShellyControl
 
+from post_state_to_web_server import post_state_to_web_server
+
 WEEKDAY_ABBREVIATIONS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 
@@ -24,6 +25,7 @@ class LightingController:
         self.shelly_control = shelly_control
         self.dusk_dawn = {}
         self.schedule_map = {}
+        self.input_map = {}  # A map if inputs to outputs
         self.state_filepath = None
         self.offset_cache = {}
         self.switch_states = []  # The current state of each switch
@@ -35,6 +37,7 @@ class LightingController:
         """Initialise the controller, refreshing the state and config as needed."""
         self.dusk_dawn = self.get_dusk_dawn_times()
         self.schedule_map = self._map_schedules_to_outputs()
+        self.input_map = self._map_inputs_to_outputs()
         state_file = self.config.get("Files", "SavedStateFile", default="system_state.json")
         self.state_filepath = SCCommon.select_file_location(state_file)  # type: ignore[attr-defined]
         self._load_state()
@@ -133,6 +136,63 @@ class LightingController:
         for output, schedule in assignments.items():
             if schedule is None:
                 assignments[output] = default_schedule
+
+        return assignments
+
+    def _map_inputs_to_outputs(self) -> dict:  # noqa: PLR0912
+        """
+        Map Shelly outputs to their associated inputs based on the InputControls section of the configuration.
+
+        Returns:
+            dict: A dictionary mapping output names to their assigned input names, or None if no input is mapped.
+        """
+        assignments = {}
+        group_map = {}
+
+        shelly_outputs = self.shelly_control.outputs
+        if not isinstance(shelly_outputs, list) or len(shelly_outputs) == 0:
+            self.logger.log_message("No Shelly outputs configured.", "warning")
+            return assignments
+
+        # Build group map for outputs
+        for output in shelly_outputs:
+            name = output.get("Name")
+            group = output.get("Group")
+            if group:
+                group_map.setdefault(group, []).append(name)
+            assignments[name] = None
+
+        input_controls = self.config.get("InputControls", default=[])
+        if not isinstance(input_controls, list) or len(input_controls) == 0:
+            self.logger.log_message("No input controls configured.", "warning")
+            return assignments
+
+        default_input = None
+        for control in input_controls:
+            ctrl_type = control.get("Type", "").lower()
+            target = control.get("Target")
+            input_name = control.get("Input")
+
+            if ctrl_type == "default":
+                default_input = input_name
+                continue
+            if ctrl_type == "switch":
+                if assignments.get(target):
+                    self.logger.log_message(f"⚠️ Output '{target}' already assigned to input '{assignments[target]}'", "warning")
+                else:
+                    assignments[target] = input_name
+            elif ctrl_type == "switch group":
+                for output in group_map.get(target, []):
+                    if assignments.get(output):
+                        self.logger.log_message(f"⚠️ Output '{output}' (in group '{target}') already assigned to input '{assignments[output]}'", "warning")
+                    else:
+                        assignments[output] = input_name
+
+        # Map all unmapped outputs to the default input if specified
+        if default_input:
+            for output, mapped_input in assignments.items():
+                if mapped_input is None:
+                    assignments[output] = default_input
 
         return assignments
 
@@ -255,8 +315,10 @@ class LightingController:
             state_entry = {
                 "Switch": switch,
                 "Schedule": schedule_name,
-                "State": desired_state
-                }
+                "State": desired_state,
+                "Input": self.input_map.get(switch),
+                "InputState": None,     # Thsi will get set by the change_swutch_states() method
+            }
             self.switch_states.append(state_entry)
 
         return self.switch_states
@@ -336,64 +398,46 @@ class LightingController:
             return
 
         for state in self.switch_states:
-            switch = state["Switch"]
-            switch_component = self.shelly_control.get_device_component("output", switch)
-            assert switch_component is not None, f"Output component '{switch}' not found in Shelly outputs"
-            current_state = "ON" if switch_component.get("State") else "OFF"
-            desired_state = state["State"]
-            if desired_state != current_state:
-                self.shelly_control.change_output(switch_component, desired_state == "ON")
-                self.logger.log_message(f"Changing state of switch '{switch}' from {current_state} to {desired_state}", "detailed")
-                self._record_switch_event(switch, state["Schedule"], desired_state)
+            output_control = state["Switch"]
+            input_control = state["Input"]
 
-    def _record_switch_event(self, switch, schedule, state):
-        """Record a switch change event.
+            # See what the current state of the outputs is
+            switch_component = self.shelly_control.get_device_component("output", output_control)
+            assert switch_component is not None, f"Output component '{output_control}' not found in Shelly outputs"
+            current_output_state = "ON" if switch_component.get("State") else "OFF"
+
+            # If the switch has an associated input control, we need to check its state as well
+            if input_control:
+                input_component = self.shelly_control.get_device_component("input", input_control)
+                input_state = "ON" if input_component.get("State") else "OFF"
+                state["InputState"] = input_state  # Store the input state in the state entry
+
+            # First see if we have an override by the input control
+            if input_control and input_state == "ON":
+                if current_output_state == "OFF":
+                    self.logger.log_message(f"Input '{input_control}' is ON, overriding switch '{output_control}' to ON", "detailed")
+                    self.shelly_control.change_output(switch_component, True)
+                    self._record_switch_event(switch=output_control, state="ON", input_name=input_control)
+                state["State"] = "ON"
+                continue
+
+            # Otherwise see if we need to turn on or off based on the schedule
+            scheduled_state = state["State"]
+            if scheduled_state != current_output_state:
+                self.shelly_control.change_output(switch_component, scheduled_state == "ON")
+                self.logger.log_message(f"Changing state of switch '{output_control}' from {current_output_state} to {scheduled_state} due to schedule {state['Schedule']}", "detailed")
+                self._record_switch_event(switch=output_control, state=scheduled_state, schedule_name=state["Schedule"])
+                state["State"] = scheduled_state
+
+    def _record_switch_event(self, switch: str, state: str, schedule_name: str | None = None, input_name: str | None = None):
+        """Record a switch change event. You must supply either a schedule or an input.
 
         Args:
             switch (str): The name of the switch.
-            schedule (str): The name of the schedule.
             state (str): The new state of the switch.
+            schedule_name (str): The name of the schedule (if any)
+            input_name (str): The name of the input control (if any).
         """
-        # Example of switch_events structure:
-        """
-        self.switch_events = [
-            {
-                "Date": "2025-08-01",
-                "Events": [
-                    {
-                        "Time": "12:13",
-                        "Switch": "Switch 01",
-                        "Schedule": "Schedule name",
-                        "State": "ON"
-                    },
-                    {
-                        "Time": "15:00",
-                        "Switch": "Switch 01",
-                        "Schedule": "Schedule name",
-                        "State": "OFF"
-                    }
-                ]
-            },
-            {
-                "Date": "2025-08-02",
-                "Events": [
-                    {
-                        "Time": "12:10",
-                        "Switch": "Switch 01",
-                        "Schedule": "Schedule name",
-                        "State": "ON"
-                    },
-                    {
-                        "Time": "16:13",
-                        "Switch": "Switch 01",
-                        "Schedule": "Schedule name",
-                        "State": "OFF"
-                    }
-                ]
-             }
-        ]
-        """
-
         event_date = DateHelper.today_str()
         # Ensure the switch_events list has an entry for today somewhere in the list
         for day_event in self.switch_events:
@@ -402,7 +446,8 @@ class LightingController:
                 day_event["Events"].append({
                     "Time": DateHelper.now_str(datetime_format="%H:%M:%S"),
                     "Switch": switch,
-                    "Schedule": schedule,
+                    "Schedule": schedule_name,
+                    "Input": input_name,
                     "State": state
                 })
                 return
@@ -414,7 +459,8 @@ class LightingController:
                 {
                     "Time": DateHelper.now_str(datetime_format="%H:%M:%S"),
                     "Switch": switch,
-                    "Schedule": schedule,
+                    "Schedule": schedule_name,
+                    "Input": input_name,
                     "State": state
                 }
             ]
