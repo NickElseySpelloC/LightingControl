@@ -26,6 +26,16 @@ class ConfigSchema:
                     "WebsiteTimeout": {"type": "number", "required": False, "nullable": True},
                 },
             },
+            "ShellyWebhooks": {
+                "type": "dict",
+                "required": False,
+                "nullable": True,
+                "schema": {
+                    "WebhookHost": {"type": "string", "required": False, "nullable": True},
+                    "WebhookPort": {"type": "number", "required": False, "nullable": True},
+                    "WebhookPath": {"type": "string", "required": False, "nullable": True},
+                },
+            },
             "ShellyDevices": {
                 "type": "dict",
                 "schema": {

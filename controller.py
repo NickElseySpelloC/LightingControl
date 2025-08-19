@@ -6,6 +6,7 @@ import random
 import re
 import time
 from pathlib import Path
+import threading
 
 import pytz
 import requests
@@ -33,6 +34,8 @@ class LightingController:
         self.config_last_check = DateHelper.now()  # Last time the config file was checked for changes
         self._initialise()
 
+        self.wake_event = threading.Event()
+        
     def _initialise(self):
         """Initialise the controller, refreshing the state and config as needed."""
         self.dusk_dawn = self.get_dusk_dawn_times()
@@ -581,7 +584,10 @@ class LightingController:
             self.evaluate_switch_states()
             self.change_switch_states()
             self._save_state()  # Save the latest state to the file including any switch change events
-            time.sleep(self.check_interval)
+            self.wake_event.wait(timeout=self.check_interval)
+            # Clear the event so future waits block again
+            if self.wake_event.is_set():
+                self.wake_event.clear()
             self.ping_heatbeat()
 
     def reload_config(self):

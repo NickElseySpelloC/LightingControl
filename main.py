@@ -7,6 +7,7 @@ from sc_utility import SCConfigManager, SCLogger, ShellyControl
 
 from config_schemas import ConfigSchema
 from controller import LightingController
+from webhook_server import start_webhook_server, WebhookConfig
 
 CONFIG_FILE = "config.yaml"
 
@@ -63,7 +64,17 @@ def main():
     # Initialize the LightingControl class
     try:
         controller = LightingController(config, logger, shelly_control)
+        # Start the webhook HTTP server in a background thread
+        try:
+            host = config.get("ShellyWebhooks", "WebhookHost", default="0.0.0.0") or "0.0.0.0"
+            port = config.get("ShellyWebhooks", "WebhookPort", default=8787) or 8787
+            path = config.get("ShellyWebhooks", "WebhookPath", default="/shelly/webhook") or "/shelly/webhook"
+            server_cfg = WebhookConfig(host=host, port=port, path=path) # pyright: ignore[reportArgumentType]
+            _server = start_webhook_server(controller, logger, server_cfg)
+        except Exception as _e:
+            logger.log_message(f'Failed to start webhook server: {_e}', 'warning')
         controller.run()
+
     except (RuntimeError, Exception) as e:
         # Handle any other untrapped exception
         main_fatal_error = f"LightingControl terminated unexpectedly due to unexpected error: {e}"
