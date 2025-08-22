@@ -26,14 +26,15 @@ class ConfigSchema:
                     "WebsiteTimeout": {"type": "number", "required": False, "nullable": True},
                 },
             },
-            "ShellyWebhooks": {
+            "InputWebhooks": {
                 "type": "dict",
                 "required": False,
                 "nullable": True,
                 "schema": {
-                    "WebhookHost": {"type": "string", "required": False, "nullable": True},
-                    "WebhookPort": {"type": "number", "required": False, "nullable": True},
-                    "WebhookPath": {"type": "string", "required": False, "nullable": True},
+                    "Enabled": {"type": "boolean", "required": False, "nullable": True},
+                    "Host": {"type": "string", "required": False, "nullable": True},
+                    "Port": {"type": "number", "required": False, "nullable": True},
+                    "Path": {"type": "string", "required": False, "nullable": True},
                 },
             },
             "ShellyDevices": {

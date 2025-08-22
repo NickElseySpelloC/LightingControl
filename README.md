@@ -49,6 +49,18 @@ General:
   WebsiteTimeout: 5
 
 
+# Optionally configure support for webhooks so that LightingControl can be notified immediately if you turn an input on or off
+InputWebhooks:
+  # Enable or disable the webhook listener
+  Enabled: False
+  # IP to listen for webhooks on. 
+  Host: 192.168.86.32
+  # Port to listen for webhooks on. 
+  Port: 8787
+  # The URL to send webhooks to. This is used by the Shelly devices to send events to the utility.
+  Path: /shelly/webhook
+
+
 # Use this section to configure your Shelly devices used to control the lights
 # See this page for more information: https://nickelseyspelloc.github.io/sc_utility/guide/shelly_control/
 ShellyDevices:
@@ -174,6 +186,17 @@ HeartbeatMonitor:
 | WebsiteBaseURL | If you have the PowerControllerViewer web app installed and running (see page 11), then enter the URL for the home page here. Assuming this is on the same machine as this installation, this will typically be http://127.0.0.1:8000. This app uses this URL to pass device state information to the web site. |
 | WebsiteAccessKey | If you have configured an access key for the PowerControllerViewer, configure it here.  |
 | WebsiteTimeout | How long to wait for a reponse from the PowerControllerViewer when posting state information. |
+
+### Section: InputWebhooks
+Optionally configure support for webhooks so that LightingControl can be notified immediately if you turn an input on or off. Webhooks are the way a Shelly device can notify an application when something has changed. Use this feature if your physical light switches are connected to the inputs of your Shelly device, and your Shelly switch is in "detached" mode. 
+
+| Parameter | Description | 
+|:--|:--|
+| Enabled | Set to True or False to enable or disable this feature. |
+| Host | The IP address of the system that you are running the LightingControl app on. |
+| Port | The port that you want the LightingControl app to listen on for webhook calls. Defaults to 8787 |
+| Path | The URL path that is called in the webhook call. Defaults to /shelly/webhook |
+
 
 ### Section: ShellyDevices
 

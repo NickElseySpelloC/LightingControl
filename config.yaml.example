@@ -13,6 +13,18 @@ General:
   WebsiteTimeout: 5
 
 
+# Optionally configure support for webhooks so that LightingControl can be notified immediately if you turn an input on or off
+InputWebhooks:
+  # Enable or disable the webhook listener
+  Enabled: False
+  # IP to listen for webhooks on. 
+  Host: 192.168.86.32
+  # Port to listen for webhooks on. 
+  Port: 8787
+  # The URL to send webhooks to. This is used by the Shelly devices to send events to the utility.
+  Path: /shelly/webhook
+
+
 # Use this section to configure your Shelly devices used to control the lights
 # See this page for more information: https://nickelseyspelloc.github.io/sc_utility/guide/shelly_control/
 ShellyDevices:

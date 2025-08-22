@@ -4,9 +4,8 @@ import json
 import operator
 import random
 import re
-import time
-from pathlib import Path
 import threading
+from pathlib import Path
 
 import pytz
 import requests
@@ -32,10 +31,13 @@ class LightingController:
         self.switch_states = []  # The current state of each switch
         self.switch_events = []  # List of switch change events for logging purposes. This is a list of days, and for each day, a list of events with the time, switch identifier and state change.
         self.config_last_check = DateHelper.now()  # Last time the config file was checked for changes
+        self.webhook_args = None    # These will be set when a webhook is received
         self._initialise()
 
+        self.evaluate_switch_states()   # Build the switch_states list
+
         self.wake_event = threading.Event()
-        
+
     def _initialise(self):
         """Initialise the controller, refreshing the state and config as needed."""
         self.dusk_dawn = self.get_dusk_dawn_times()
@@ -407,30 +409,33 @@ class LightingController:
             # See what the current state of the outputs is
             switch_component = self.shelly_control.get_device_component("output", output_control)
             assert switch_component is not None, f"Output component '{output_control}' not found in Shelly outputs"
-            current_output_state = "ON" if switch_component.get("State") else "OFF"
+            if self.shelly_control.is_device_online(switch_component):
+                current_output_state = "ON" if switch_component.get("State") else "OFF"
 
-            # If the switch has an associated input control, we need to check its state as well
-            if input_control:
-                input_component = self.shelly_control.get_device_component("input", input_control)
-                input_state = "ON" if input_component.get("State") else "OFF"
-                state["InputState"] = input_state  # Store the input state in the state entry
+                # If the switch has an associated input control, we need to check its state as well
+                if input_control:
+                    input_component = self.shelly_control.get_device_component("input", input_control)
+                    input_state = "ON" if input_component.get("State") else "OFF"
+                    state["InputState"] = input_state  # Store the input state in the state entry
 
-            # First see if we have an override by the input control
-            if input_control and input_state == "ON":
-                if current_output_state == "OFF":
-                    self.logger.log_message(f"Input '{input_control}' is ON, overriding switch '{output_control}' to ON", "detailed")
-                    self.shelly_control.change_output(switch_component, True)
-                    self._record_switch_event(switch=output_control, state="ON", input_name=input_control)
-                state["State"] = "ON"
-                continue
+                # First see if we have an override by the input control
+                if input_control and input_state == "ON":
+                    if current_output_state == "OFF":
+                        self.logger.log_message(f"Input '{input_control}' is ON, overriding switch '{output_control}' to ON", "detailed")
+                        self.shelly_control.change_output(switch_component, True)
+                        self._record_switch_event(switch=output_control, state="ON", input_name=input_control)
+                    state["State"] = "ON"
+                    continue
 
-            # Otherwise see if we need to turn on or off based on the schedule
-            scheduled_state = state["State"]
-            if scheduled_state != current_output_state:
-                self.shelly_control.change_output(switch_component, scheduled_state == "ON")
-                self.logger.log_message(f"Changing state of switch '{output_control}' from {current_output_state} to {scheduled_state} due to schedule {state['Schedule']}", "detailed")
-                self._record_switch_event(switch=output_control, state=scheduled_state, schedule_name=state["Schedule"])
-                state["State"] = scheduled_state
+                # Otherwise see if we need to turn on or off based on the schedule
+                scheduled_state = state["State"]
+                if scheduled_state != current_output_state:
+                    self.shelly_control.change_output(switch_component, scheduled_state == "ON")
+                    self.logger.log_message(f"Changing state of switch '{output_control}' from {current_output_state} to {scheduled_state} due to schedule {state['Schedule']}", "detailed")
+                    self._record_switch_event(switch=output_control, state=scheduled_state, schedule_name=state["Schedule"])
+                    state["State"] = scheduled_state
+            else:
+                self.logger.log_message(f"Switch '{output_control}' is offline, skipping state change", "debug")
 
     def _record_switch_event(self, switch: str, state: str, schedule_name: str | None = None, input_name: str | None = None):
         """Record a switch change event. You must supply either a schedule or an input.
@@ -587,6 +592,10 @@ class LightingController:
             self.wake_event.wait(timeout=self.check_interval)
             # Clear the event so future waits block again
             if self.wake_event.is_set():
+                # We were woken by a webhook call
+                if self.webhook_args:
+                    self.logger.log_message(f"Received webhook interrupt. Arguments: {self.webhook_args}", "debug")
+                    # Note for now we're not using the webhook arguments. We may use them later.
                 self.wake_event.clear()
             self.ping_heatbeat()
 
