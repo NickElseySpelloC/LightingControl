@@ -417,10 +417,13 @@ class LightingController:
 
         return "OFF"
 
-    def change_switch_states(self):
+    def change_switch_states(self, event: dict | None = None):
         """Change the switch states based on the evaluated switch states.
 
         This method will iterate through the evaluated switch states and change the state of each switch accordingly.
+
+        Args:
+            event (dict | None): An optional event dictionary containing information about the event that triggered the state change.
         """
         # First refresh the status of all devices
         try:
@@ -445,7 +448,12 @@ class LightingController:
                     input_state = "ON" if input_component.get("State") else "OFF"
                     state["InputState"] = input_state  # Store the input state in the state entry
 
-                # First see if we have an override by the input control
+                # If we received a webhook event that overrides the current switch state, record that as an event
+                if input_control and event and event.get("Component", {}).get("Name") == input_control:
+                    self.logger.log_message(f"Webhook event {event.get('Event')} received for {input_control}", "debug")
+                    self._record_switch_event(switch=output_control, state=input_component.get("State"), input_name=input_control)  # pyright: ignore[reportArgumentType]
+
+                # Now see if the we have an override by the input control
                 if input_control and input_state == "ON":
                     if current_output_state == "OFF":
                         self.logger.log_message(f"Input '{input_control}' is ON, overriding switch '{output_control}' to ON", "detailed")
@@ -624,10 +632,8 @@ class LightingController:
                 event = self.shelly_control.pull_webhook_event()
                 if event:
                     event_name = event.get("Event")
-                    if event_name == "input.toggle_on":
-                        component = event.get("Component")
-                        self.logger.log_message(f"Webhook event received {event_name} from component {component.get("Name")}", "debug")  # pyright: ignore[reportOptionalMemberAccess]
-                        self.change_switch_states()
+                    if event_name in {"input.toggle_on", "input.toggle_off"}:
+                        self.change_switch_states(event)
                 self.wake_event.clear()
             self.ping_heatbeat()
 
