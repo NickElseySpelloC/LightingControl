@@ -623,8 +623,11 @@ class LightingController:
                 # We were woken by a webhook call
                 event = self.shelly_control.pull_webhook_event()
                 if event:
-                    self.logger.log_message(f"Webhook event received {event.get('Event')} from component {event.get('Component').get('Name')}", "debug")  # pyright: ignore[reportOptionalMemberAccess]
-
+                    event_name = event.get("Event")
+                    if event_name == "input.toggle_on":
+                        component = event.get("Component")
+                        self.logger.log_message(f"Webhook event received {event_name} from component {component.get("Name")}", "debug")  # pyright: ignore[reportOptionalMemberAccess]
+                        self.change_switch_states()
                 self.wake_event.clear()
             self.ping_heatbeat()
 
