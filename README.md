@@ -209,6 +209,8 @@ The table below defines the events part of a schedule. You can have any number o
 
 Maps the schedules to switches and switch groups. You can have any number of entries in this section, each one must define at least the Type and Schedule keys.
 
+**Important**: If you are configuring webhooks (in the ShellyDevices section) so that inputs can control the outout of one of more switch via this app, make sure you have the 'relay type' configured to "Detached" switch mode (in the Shelly app, go to Device > Settings Input/output settings).
+
 | Parameter | Description | 
 |:--|:--|
 | Type | One of:<br>- Default: Schedule applies to all switches and switch groups not exlictly mapped to schedule elsewhere in this section.<br>- Switch: Map a schedule to a specific switch.<br>- Switch Group: Map a schedule to a specific switch group. |
