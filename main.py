@@ -3,11 +3,10 @@
 import platform
 import sys
 
-from sc_utility import SCConfigManager, SCLogger, ShellyControl
+from sc_utility import SCConfigManager, SCLogger
 
 from config_schemas import ConfigSchema
 from controller import LightingController
-from webhook_server import start_webhook_server
 
 CONFIG_FILE = "config.yaml"
 
@@ -42,19 +41,6 @@ def main():
     if email_settings is not None:
         logger.register_email_settings(email_settings)
 
-    # Initialize the ShellyControl class
-    # Create an instance of the ShellyControl class
-    shelly_settings = config.get_shelly_settings()
-    if shelly_settings is None:
-        logger.log_fatal_error("No Shelly settings found in the configuration file.")
-        return
-    try:
-        assert isinstance(shelly_settings, dict)
-        shelly_control = ShellyControl(logger, shelly_settings)
-    except RuntimeError as e:
-        logger.log_fatal_error(f"Shelly control initialization error: {e}")
-        return
-
     # If the prior run fails, send email that this run worked OK
     if logger.get_fatal_error():
         logger.log_message("Run was successful after a prior failure.", "summary")
@@ -63,14 +49,7 @@ def main():
 
     # Initialize the LightingControl class
     try:
-        controller = LightingController(config, logger, shelly_control)
-
-        if config.get("InputWebhooks", "Enabled", default=False):
-            # Start the webhook HTTP server in a background thread
-            try:
-                _server = start_webhook_server(controller, config, logger)
-            except (RuntimeError, OSError) as e:
-                logger.log_message(f"Failed to start webhook server: {e}", "warning")
+        controller = LightingController(config, logger)
 
         # Run the main loop
         controller.run()

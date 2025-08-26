@@ -19,10 +19,9 @@ WEEKDAY_ABBREVIATIONS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 
 class LightingController:
-    def __init__(self, config: SCConfigManager, logger: SCLogger, shelly_control: ShellyControl):
+    def __init__(self, config: SCConfigManager, logger: SCLogger):
         self.config = config
         self.logger = logger
-        self.shelly_control = shelly_control
         self.dusk_dawn = {}
         self.schedule_map = {}
         self.input_map = {}  # A map if inputs to outputs
@@ -31,12 +30,24 @@ class LightingController:
         self.switch_states = []  # The current state of each switch
         self.switch_events = []  # List of switch change events for logging purposes. This is a list of days, and for each day, a list of events with the time, switch identifier and state change.
         self.config_last_check = DateHelper.now()  # Last time the config file was checked for changes
-        self.webhook_args = None    # These will be set when a webhook is received
+        self.wake_event = threading.Event()
+
+        # Initialize the ShellyControl class
+        # Create an instance of the ShellyControl class
+        shelly_settings = config.get_shelly_settings()
+        if shelly_settings is None:
+            logger.log_fatal_error("No Shelly settings found in the configuration file.")
+            return
+        try:
+            assert isinstance(shelly_settings, dict)
+            self.shelly_control = ShellyControl(logger, shelly_settings, self.wake_event)
+        except RuntimeError as e:
+            logger.log_fatal_error(f"Shelly control initialization error: {e}")
+            return
+
         self._initialise()
 
         self.evaluate_switch_states()   # Build the switch_states list
-
-        self.wake_event = threading.Event()
 
     def _initialise(self):
         """Initialise the controller, refreshing the state and config as needed."""
@@ -52,26 +63,42 @@ class LightingController:
         self.logger.log_message("Lighting Controller initialised successfully.", "debug")
 
     def get_dusk_dawn_times(self) -> dict:
-        """Get the dawn and dusk times based on the location configuration.
+        """Get the dawn and dusk times based on the location returned from the specified shelly switch or the manually configured location configuration.
 
         Returns:
             dict: A dictionary with 'dawn' and 'dusk' times.
         """
+        name = "LightingControl"
         loc_conf = self.config.get("Location", default={})
         assert isinstance(loc_conf, dict), "Location configuration must be a dictionary"
-        name = loc_conf.get("Name", "Unknown")
-        tz = loc_conf["Timezone"]
+        tz = lat = lon = None
 
-        # Extract coordinates
-        if "GoogleMapsURL" in loc_conf and loc_conf["GoogleMapsURL"] is not None:
-            url = loc_conf["GoogleMapsURL"]
-            match = re.search(r"@?([-]?\d+\.\d+),([-]?\d+\.\d+)", url)
-            if match:
-                lat = float(match.group(1))
-                lon = float(match.group(2))
-        else:
-            lat = loc_conf["Latitude"]
-            lon = loc_conf["Longitude"]
+        shelly_device_name = loc_conf.get("UseShellyDevice")
+        if shelly_device_name:
+            # Get the tz, lat and long from the specified Shelly device
+            try:
+                device = self.shelly_control.get_device(shelly_device_name)
+                shelly_loc = self.shelly_control.get_device_location(device)
+                if shelly_loc:
+                    tz = shelly_loc.get("tz")
+                    lat = shelly_loc.get("lat")
+                    lon = shelly_loc.get("lon")
+            except (RuntimeError, TimeoutError) as e:
+                self.logger.log_message(f"Error getting location from Shelly device {shelly_device_name}: {e}", "warning")
+
+        # If we were unable to get the location from the Shelly device, see if we can extract it from the Google Maps url (if supplied)
+        if tz is None:
+            tz = loc_conf["Timezone"]
+            # Extract coordinates
+            if "GoogleMapsURL" in loc_conf and loc_conf["GoogleMapsURL"] is not None:
+                url = loc_conf["GoogleMapsURL"]
+                match = re.search(r"@?([-]?\d+\.\d+),([-]?\d+\.\d+)", url)
+                if match:
+                    lat = float(match.group(1))
+                    lon = float(match.group(2))
+            else:   # Last resort, try the config values
+                lat = loc_conf["Latitude"]
+                lon = loc_conf["Longitude"]
 
         if lat is None or lon is None:
             self.logger.log_message("Latitude and longitude could not be determined, using defaults for 0°00'00\"N 0°00'00.0\"E.", "warning")
@@ -592,10 +619,12 @@ class LightingController:
             self.wake_event.wait(timeout=self.check_interval)
             # Clear the event so future waits block again
             if self.wake_event.is_set():
+
                 # We were woken by a webhook call
-                if self.webhook_args:
-                    self.logger.log_message(f"Received webhook interrupt. Arguments: {self.webhook_args}", "debug")
-                    # Note for now we're not using the webhook arguments. We may use them later.
+                event = self.shelly_control.pull_webhook_event()
+                if event:
+                    self.logger.log_message(f"Webhook event received {event.get('Event')} from component {event.get('Component').get('Name')}", "debug")  # pyright: ignore[reportOptionalMemberAccess]
+
                 self.wake_event.clear()
             self.ping_heatbeat()
 

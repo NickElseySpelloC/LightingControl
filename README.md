@@ -36,6 +36,8 @@ This hasn't been tested yet.
 The script uses the *config.yaml* YAML file for configuration. An example of included with the project (*config.yaml.example*). Copy this to *config.yaml* before running the app for the first time.  Here's an example config file:
 
 ```yaml
+# This is the configuration file for the LightingControl utility 
+
 General:
   # The name of the application
   AppName: My Home Lights
@@ -49,18 +51,6 @@ General:
   WebsiteTimeout: 5
 
 
-# Optionally configure support for webhooks so that LightingControl can be notified immediately if you turn an input on or off
-InputWebhooks:
-  # Enable or disable the webhook listener
-  Enabled: False
-  # IP to listen for webhooks on. 
-  Host: 192.168.86.32
-  # Port to listen for webhooks on. 
-  Port: 8787
-  # The URL to send webhooks to. This is used by the Shelly devices to send events to the utility.
-  Path: /shelly/webhook
-
-
 # Use this section to configure your Shelly devices used to control the lights
 # See this page for more information: https://nickelseyspelloc.github.io/sc_utility/guide/shelly_control/
 ShellyDevices:
@@ -68,22 +58,20 @@ ShellyDevices:
   RetryCount: 1
   RetryDelay: 2
   PingAllowed: True
+  WebhooksEnabled: True
+  WebhookHost: 192.168.1.99
+  WebhookPort: 8787
+  WebhookPath: /shelly/webhook  
   Devices:
     - Name: Downstairs Lights
       Model: Shelly2PMG3
       Simulate: False
-      Inputs:
-        - Name: "Living Room Input"
-        - Name: "Kitchen Input"
       Outputs:
         - Name: "Living Room"
         - Name: "Kitchen"
     - Name: Outside Lights
       Model: Shelly2PMG3
       Simulate: False
-      Inputs:
-        - Name: "Outside Switch"
-        - Name: "Unused 1"
       Outputs:
         - Name: "Patio"
           Group: External Lights
@@ -91,10 +79,13 @@ ShellyDevices:
           Group: Nighttime
 
 
-# Use this section to configure the location of your home so that we can caculate sunrise and sunset times
-# Specify the latitude and longitude of your home or use the Google Maps URL which includes the coordinates
+# Use this section to specify the geographic location and timezone of your installation. This is used to determine the dawn and dusk times for lighting control.
+# You can do this in one of three ways:
+# 1. Use a Shelly device's location (using IP lookup)- just specify the device name in the UseShellyDevice field
+# 2. Use a Google Maps URL to extract the location - specify the GoogleMapsURL field and the Timezone field.
+# 3. Manually specify the latitude and longitude - specify the Timezone, Latitude and Longitude fields.
 Location:
-  Name: Rome
+  UseShellyDevice: 
   Timezone: Europe/Rome
   GoogleMapsURL: https://www.google.com/maps/place/Rome,+Metropolitan+City+of+Rome+Capital/@41.9099533,12.3711975,101027m
   Latitude: 
@@ -128,19 +119,6 @@ LightingControl:
   - Type: Switch Group
     Target: External Lights
     Schedule: Dusk to Dawn
-
-# Optional. Map Shelly inputs to lighting control actions. If an input is mapped to a switch or switch group 
-# then the lights in that target will be On when the input is on, regardless of the schedule 
-InputControls:
-  - Type: Switch   
-    Target: Living Room
-    Input: Living Room Input
-  - Type: Switch   
-    Target: Kitchen
-    Input: Kitchen Input
-  - Type: Switch Group
-    Target: External Lights
-    Input: Outside Switch
 
 
 Files:
@@ -187,28 +165,20 @@ HeartbeatMonitor:
 | WebsiteAccessKey | If you have configured an access key for the PowerControllerViewer, configure it here.  |
 | WebsiteTimeout | How long to wait for a reponse from the PowerControllerViewer when posting state information. |
 
-### Section: InputWebhooks
-Optionally configure support for webhooks so that LightingControl can be notified immediately if you turn an input on or off. Webhooks are the way a Shelly device can notify an application when something has changed. Use this feature if your physical light switches are connected to the inputs of your Shelly device, and your Shelly switch is in "detached" mode. 
-
-| Parameter | Description | 
-|:--|:--|
-| Enabled | Set to True or False to enable or disable this feature. |
-| Host | The IP address of the system that you are running the LightingControl app on. |
-| Port | The port that you want the LightingControl app to listen on for webhook calls. Defaults to 8787 |
-| Path | The URL path that is called in the webhook call. Defaults to /shelly/webhook |
-
-
 ### Section: ShellyDevices
 
 In this section you can configure one or more Shelly Smart switches, one of which will be used to contro your pool pump or water heater and optionally monitor its energy usage. See the [Shelly Getting Started guide](https://nickelseyspelloc.github.io/sc_utility/guide/shelly_control/) for details on how to configure this section.
 
 ### Section: Location
 
-Use this section to configure the location of your home so that we can caculate sunrise and sunset times. Specify the latitude and longitude of your home or use the Google Maps URL which includes the coordinates.
+Use this section to specify the geographic location and timezone of your installation. This is used to determine the dawn and dusk times for lighting control. You can do this in one of three ways:
+1. Use a Shelly device's location (using IP lookup)- just specify the device name in the UseShellyDevice field
+2. Use a Google Maps URL to extract the location - specify the GoogleMapsURL field and the Timezone field.
+3. Manually specify the latitude and longitude - specify the Timezone, Latitude and Longitude fields.
 
 | Parameter | Description | 
 |:--|:--|
-| Name | The name of your location. |
+| UseShellyDevice | The name the Shelly device (configured in the ShellyDevices: Devices section) to use to get your location using IP geo-lookup. |
 | Timezone | The timezone of your location. See this link for a list: https://gist.github.com/heyalexej/8bf688fd67d7199be4a1682b3eec7568 |
 | GoogleMapsURL | Optionally provide a Google Maps URL which includes the lat/long in the url args. Your location will be determined from this. |
 | Latitude | If you haven't provided a Google Maps URL, instead provide the latitude of your location |

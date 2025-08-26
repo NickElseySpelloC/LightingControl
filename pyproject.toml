@@ -7,5 +7,5 @@ requires-python = ">=3.13"
 dependencies = [
     "astral>=3.2",
     "pytz>=2025.2",
-    "sc-utility>=2.1.8",
+    "sc-utility>=2.2.0",
 ]
