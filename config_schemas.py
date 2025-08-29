@@ -29,6 +29,7 @@ class ConfigSchema:
             "ShellyDevices": {
                 "type": "dict",
                 "schema": {
+                    "AllowDebugLogging": {"type": "boolean", "required": False, "nullable": True},
                     "ResponseTimeout": {"type": "number", "required": False, "nullable": True, "min": 1, "max": 120},
                     "RetryCount": {"type": "number", "required": False, "nullable": True, "min": 0, "max": 10},
                     "RetryDelay": {"type": "number", "required": False, "nullable": True, "min": 1, "max": 10},

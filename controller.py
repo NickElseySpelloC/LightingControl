@@ -651,8 +651,10 @@ class LightingController:
             if self.wake_event.is_set():
 
                 # We were woken by a webhook call
-                event = self.shelly_control.pull_webhook_event()
-                if event:
+                while True:
+                    event = self.shelly_control.pull_webhook_event()
+                    if not event:
+                        break
                     event_name = event.get("Event")
                     if event_name in {"input.toggle_on", "input.toggle_off"}:
                         self.change_switch_states(event)
