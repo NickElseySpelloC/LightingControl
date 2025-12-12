@@ -5,7 +5,7 @@ description = "Control multiple lights using Shelly smart switches"
 readme = "README.md"
 requires-python = ">=3.13"
 service_name="LightingControl"
-launch_path="main.py"
+launch_path="src/main.py"
 dependencies = [
     "astral>=3.2",
     "pytz>=2025.2",
