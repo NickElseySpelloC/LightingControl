@@ -16,7 +16,7 @@ build/
 dist/
 venv/
 wheels/
-
+.gitignore
 
 # App 
 archive/
