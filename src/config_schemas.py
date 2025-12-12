@@ -26,6 +26,17 @@ class ConfigSchema:
                     "WebsiteTimeout": {"type": "number", "required": False, "nullable": True},
                 },
             },
+            "ViewerWebsite": {
+                "type": "dict",
+                "schema": {
+                    "Enable": {"type": "boolean", "required": False, "nullable": True},
+                    "Label": {"type": "string", "required": False, "nullable": True},
+                    "BaseURL": {"type": "string", "required": False, "nullable": True},
+                    "AccessKey": {"type": "string", "required": False, "nullable": True},
+                    "APITimeout": {"type": "number", "required": False, "nullable": True, "min": 1, "max": 60},
+                    "Frequency": {"type": "number", "required": False, "nullable": True, "min": 1, "max": 3600},
+                },
+            },
             "ShellyDevices": {
                 "type": "dict",
                 "schema": {

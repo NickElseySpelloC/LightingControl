@@ -5,12 +5,6 @@ General:
   AppName: My Home Lights
   # Number of seconds to wait before checking the schedules again
   CheckInterval: 60
-  # Optional: Base URL for the PowerControllerViewer website to post state information to
-  WebsiteBaseURL: http://127.0.0.1:8000
-  # The PowerControllerViewer access key, if required
-  WebsiteAccessKey: 
-  # Timeout for website requests in seconds
-  WebsiteTimeout: 5
 
 
 # Use this section to configure your Shelly devices used to control the lights
@@ -86,7 +80,7 @@ LightingControl:
 Files:
   # The name of the saved state file. This is used to store the state of the device between runs.
   SavedStateFile: system_state.json
-  LogfileName: logfile.log
+  LogfileName: logs/logfile.log
   LogfileMaxLines: 5000
   # How much information do we write to the log file. One of: none; error; warning; summary; detailed; debug
   LogfileVerbosity: detailed
@@ -105,6 +99,16 @@ Email:
   SMTPUsername: <Your SMTP username here>
   SMTPPassword: <Your SMTP password here>
   SubjectPrefix: 
+
+
+ViewerWebsite:
+  # Enable or disable posting to the web viewer app
+  Enable: True
+  # Base URL for the PowerControllerViewer website to post state information to
+  BaseURL: http://127.0.0.1:8000
+  APITimeout: 20
+  # How often to post the state to the web viewer app (in seconds)
+  Frequency: 10
 
 
 # Optionally configure a heartbeat monitor to check the availability of a website - using BetterStack uptime

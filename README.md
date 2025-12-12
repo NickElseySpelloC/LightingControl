@@ -43,12 +43,6 @@ General:
   AppName: My Home Lights
   # Number of seconds to wait before checking the schedules again
   CheckInterval: 60
-  # Optional: Base URL for the PowerControllerViewer website to post state information to
-  WebsiteBaseURL: http://127.0.0.1:8000
-  # The PowerControllerViewer access key, if required
-  WebsiteAccessKey: 
-  # Timeout for website requests in seconds
-  WebsiteTimeout: 5
 
 
 # Use this section to configure your Shelly devices used to control the lights
@@ -124,7 +118,7 @@ LightingControl:
 Files:
   # The name of the saved state file. This is used to store the state of the device between runs.
   SavedStateFile: system_state.json
-  LogfileName: logfile.log
+  LogfileName: logs/logfile.log
   LogfileMaxLines: 5000
   # How much information do we write to the log file. One of: none; error; warning; summary; detailed; debug
   LogfileVerbosity: detailed
@@ -143,6 +137,16 @@ Email:
   SMTPUsername: <Your SMTP username here>
   SMTPPassword: <Your SMTP password here>
   SubjectPrefix: 
+
+
+ViewerWebsite:
+  # Enable or disable posting to the web viewer app
+  Enable: True
+  # Base URL for the PowerControllerViewer website to post state information to
+  BaseURL: http://127.0.0.1:8000
+  APITimeout: 20
+  # How often to post the state to the web viewer app (in seconds)
+  Frequency: 10
 
 
 # Optionally configure a heartbeat monitor to check the availability of a website - using BetterStack uptime
@@ -251,6 +255,27 @@ at the EnergyUsed entries for the last 7 days in the system_state.json file for 
 | SMTPPassword | The password used to login to the SMTP server. If using a Google account, create an app password for the app at https://myaccount.google.com/apppasswords  |
 | SubjectPrefix | Optional. If set, the app will add this text to the start of any email subject line for emails it sends. |
 
+### Section: ViewerWebsite
+
+Use this section to configure integration with the PowerControllerViewer app - see https://github.com/NickElseySpelloC/PowerControllerViewer
+
+| Parameter | Description | 
+|:--|:--|
+| Enable | Set to True to enable integration with the PowerControllerViewer app | 
+| BaseURL | The base URL of the PowerControllerViewer app | 
+| AccessKey | The access key for the PowerControllerViewer app | 
+| APITimeout | How long to wait in seconds for a response from the PowerControllerViewer app | 
+| Frequency | How often to post the state to the web viewer app (in seconds) | 
+
+### Section: HeartbeatMonitor
+
+| Parameter | Description | 
+|:--|:--|
+| Enable | Set to True to enable integration with the Heartbeat monitoring service | 
+| WebsiteURL | Each time the app runs successfully, you can have it hit this URL to record a heartbeat. This is optional. If the app exist with a fatal error, it will append /fail to this URL. | 
+| HeartbeatTimeout | How long to wait for a response from the website before considering it down in seconds. | 
+| Frequency | How often to post the state to the heartbeat monitor (in seconds) | 
+
 # Setting up the Smart Switch
 
 The Power Controller is currently designed to physically start or stop the pool device via Shelly Smart Switch. This is a relay that can be connected to your local Wi-Fi network and controlled remotely via an API call. A detailed setup guide is beyond the scope of this document, but the brief steps are as follows:
@@ -291,28 +316,30 @@ This section shows you how to configure the app to run automatically at boot on 
 Create a new service file at _/etc/systemd/system/LightingControl.service_. Edit the content below as appropriate
 ```
 [Unit]
-Description=My Lighting Control app
+Description=Lighting Control app
 After=network.target
 
 [Service]
 ExecStart=/home/pi/scripts/LightingControl/launch.sh
 WorkingDirectory=/home/pi/scripts/LightingControl
-Restart=on-failure
-RestartSec=5
 StandardOutput=journal
 StandardError=journal
 User=pi
 Environment=PYTHONUNBUFFERED=1
 Environment=PATH=/home/pi/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
+# Logging and restart behavior
+Restart=on-failure        # Only restart on non-zero exit code
+RestartSec=10             # Wait 10 seconds before restarting
+
+# Limit restart attempts (3 times in 60 seconds)
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+
 [Install]
 WantedBy=multi-user.target
 ```
-Key options:
-
-- Restart=on-failure: restart if the script exits with a non-zero code.
-- RestartSec=5: wait 5 seconds before restarting.
-- StandardOutput=journal: logs go to journalctl.
 
 
 ## 2. Enable and start the service

@@ -1,11 +1,13 @@
 [project]
 name = "LightingControl"
-version = "0.1.0"
+version = "1.0.0"
 description = "Control multiple lights using Shelly smart switches"
 readme = "README.md"
 requires-python = ">=3.13"
+service_name="LightingControl"
+launch_path="main.py"
 dependencies = [
     "astral>=3.2",
     "pytz>=2025.2",
-    "sc-utility>=2.2.0",
+    "sc-utility>=2.4.8",
 ]

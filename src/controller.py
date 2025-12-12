@@ -11,10 +11,18 @@ import pytz
 import requests
 from astral import LocationInfo
 from astral.sun import sun
-from sc_utility import DateHelper, SCCommon, SCConfigManager, SCLogger, ShellyControl
+from sc_utility import (
+    DateHelper,
+    JSONEncoder,
+    SCCommon,
+    SCConfigManager,
+    SCLogger,
+    ShellyControl,
+)
 
-from post_state_to_web_server import post_state_to_web_server
+from post_state_to_web_viewer import post_state_to_web_viewer
 
+SCHEMA_VERSION = 2  # Version of the system_state schema we expect
 WEEKDAY_ABBREVIATIONS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 
@@ -228,28 +236,39 @@ class LightingController:
 
         return assignments
 
-    def _load_state(self) -> dict:
+    def _load_state(self) -> bool:
         """Load the random offsets from the the saved state file.
 
         Returns:
-            dict: The RandomOffsets section of the state file, or an empty dictionary if none exists.
+            bool: True if the state was loaded successfully, False if it didn't exist.
         """
         assert isinstance(self.state_filepath, Path), "State file path must be a Path object"
 
         # If the file exists and its at least 500 bytes long
         if self.state_filepath.exists() and self.state_filepath.stat().st_size >= 500:
             try:
-                with self.state_filepath.open("r", encoding="utf-8") as f:
-                    state = json.load(f)
+                state = JSONEncoder.read_from_file(self.state_filepath)
+                if not state:
+                    return False
 
-                    # Now load the RandomOffset cached values from the state file
-                    self.offset_cache = state.get("RandomOffsets", {})
+                assert isinstance(state, dict), "State file content must be a dictionary"
+                schema_version = state.get("SchemaVersion")
+                if not schema_version or schema_version < SCHEMA_VERSION:
+                    self.logger.log_fatal_error(f"State file schema version {schema_version} does not match expected version {SCHEMA_VERSION}.")
 
-                    # Now load the SwitchEvents list from the state file
-                    self.switch_events = state.get("SwitchEvents", [])
+                if state.get("StateFileType") != "LightingControl":
+                    self.logger.log_fatal_error(f"Invalid system state file type {state.get('StateFileType')}, cannot load file {self.state_filepath}")
+
+                # Now load the RandomOffset cached values from the state file
+                self.offset_cache = state.get("RandomOffsets", {})
+
+                # Now load the SwitchEvents list from the state file
+                self.switch_events = state.get("SwitchEvents", [])
             except json.JSONDecodeError as e:
                 self.logger.log_fatal_error(f"Failed to load state file {self.state_filepath}: {e}")
-        return {}
+            else:
+                return True
+        return False
 
     def _save_state(self):
         """Save the current state to the state file. This includes the RandomOffsets and SwitchStates sections."""
@@ -258,40 +277,33 @@ class LightingController:
 
         # Build the JSON state file and save it
         assert isinstance(self.state_filepath, Path), "State file path must be a Path object"
-        try:  # noqa: PLR1702
-            with self.state_filepath.open("w", encoding="utf-8") as f:
-                config_schedules = self.config.get("Schedules", default=[])
-                if isinstance(config_schedules, list):
-                    schedules = copy.deepcopy(config_schedules)
-                    # Convert the StartDate and EndDate in DatesOff to strings
-                    for schedule in schedules:
-                        for event in schedule.get("Events", []):
-                            if "DatesOff" in event and isinstance(event["DatesOff"], list):
-                                for rng in event.get("DatesOff", []):
-                                    if "StartDate" in rng and "EndDate" in rng and isinstance(rng["StartDate"], dt.date) and isinstance(rng["EndDate"], dt.date):
-                                        rng["StartDate"] = rng["StartDate"].isoformat()
-                                        rng["EndDate"] = rng["EndDate"].isoformat()
 
-                state_data = {
-                    "StateFileType": "LightingControl",
-                    "LastStateSaveTime": DateHelper.now_str(),
-                    "DeviceType": "LightingController",
-                    "DeviceName": self.config.get("General", "AppName", default="LightingControl"),
-                    "LastStatusMessage": "State saved successfully.",
-                    "Dawn": self.dusk_dawn.get("dawn").strftime("%H:%M"),  # type: ignore  # noqa: PGH003
-                    "Dusk": self.dusk_dawn.get("dusk").strftime("%H:%M"),  # type: ignore  # noqa: PGH003
-                    "RandomOffsets": self.offset_cache,
-                    "SwitchStates": self.switch_states,
-                    "Schedules": schedules,
-                    "SwitchEvents": self.switch_events,
-                }
+        # Build the object to save
+        try:
+            config_schedules = self.config.get("Schedules", default=[])
+            if isinstance(config_schedules, list):
+                schedules = copy.deepcopy(config_schedules)
 
-                json.dump(state_data, f, indent=2)
-        except (OSError, TypeError, ValueError) as e:
+            state_data = {
+                "SchemaVersion": SCHEMA_VERSION,
+                "StateFileType": "LightingControl",
+                "LastStateSaveTime": DateHelper.now(),
+                "DeviceType": "LightingController",
+                "DeviceName": self.config.get("General", "AppName", default="LightingControl"),
+                "LastStatusMessage": "State saved successfully.",
+                "Dawn": self.dusk_dawn.get("dawn"),  # type: ignore  # noqa: PGH003
+                "Dusk": self.dusk_dawn.get("dusk"),  # type: ignore  # noqa: PGH003
+                "RandomOffsets": self.offset_cache,
+                "SwitchStates": self.switch_states,
+                "Schedules": schedules,
+                "SwitchEvents": self.switch_events,
+            }
+            JSONEncoder.save_to_file(state_data, self.state_filepath)
+        except (OSError, TypeError, ValueError, RuntimeError) as e:
             self.logger.log_fatal_error(f"Failed to save state file: {e}")
 
-        # Now if the WebsiteBaseURL has been set, save the state to the web server
-        post_state_to_web_server(self.config, self.logger, state_data)
+        # Save the state to the web server if required
+        post_state_to_web_viewer(self.config, self.logger, state_data)
 
     def _trim_switch_events(self):
         """Trim the switch events to keep only the last N days of history. Also sorts the events by date and time."""
@@ -300,14 +312,19 @@ class LightingController:
         assert max_days > 0, "MaxDaysSwitchChangeHistory must be a positive integer"
 
         cutoff_date = DateHelper.today_add_days(-max_days)
-        cutoff_date_str = DateHelper.format_date(cutoff_date)
 
         # Filter out events older than the cutoff date
-        self.switch_events = [day_event for day_event in self.switch_events if day_event["Date"] >= cutoff_date_str]
+        self.switch_events = [day_event for day_event in self.switch_events if day_event["Date"] >= cutoff_date]
         # Now sort the switch events by date and time
         self.switch_events.sort(key=operator.itemgetter("Date"))
         for day_event in self.switch_events:
             day_event["Events"].sort(key=operator.itemgetter("Time"))
+
+    def shutdown(self):
+        """Shutdown the controller, performing any necessary cleanup."""
+        self.logger.log_message("Shutting down Lighting Controller...", "summary")
+        self._save_state()
+        self.shelly_control.shutdown()
 
     @staticmethod
     def _generate_offset_key(schedule_name: str, event_index: int, mode: str) -> str:
@@ -501,13 +518,13 @@ class LightingController:
             input_name (str): The name of the input control (if any).
             webhook_state (str): The state of the webhook event (if any).
         """
-        event_date = DateHelper.today_str()
+        event_date = DateHelper.today()
         # Ensure the switch_events list has an entry for today somewhere in the list
         for day_event in self.switch_events:
             if day_event["Date"] == event_date:
                 # If we found today's date, append the event to today's events
                 day_event["Events"].append({
-                    "Time": DateHelper.now_str(datetime_format="%H:%M:%S"),
+                    "Time": DateHelper.now().time(),
                     "Switch": switch,
                     "Schedule": schedule_name,
                     "Input": input_name,
@@ -521,7 +538,7 @@ class LightingController:
             "Date": event_date,
             "Events": [
                 {
-                    "Time": DateHelper.now_str(datetime_format="%H:%M:%S"),
+                    "Time": DateHelper.now().time(),
                     "Switch": switch,
                     "Schedule": schedule_name,
                     "Input": input_name,

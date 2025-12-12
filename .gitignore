@@ -16,13 +16,14 @@ build/
 dist/
 venv/
 wheels/
-uv.lock
+
 
 # App 
 archive/
 /*.csv
-/*.log
 /*.json
 /*.txt
-/*.yaml
 hold
+logs/*
+config.yaml
+simulation_data
