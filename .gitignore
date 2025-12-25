@@ -16,7 +16,8 @@ build/
 dist/
 venv/
 wheels/
-.gitignore
+.env
+.cache_ggshield
 
 # App 
 archive/

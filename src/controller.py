@@ -24,12 +24,14 @@ from post_state_to_web_viewer import post_state_to_web_viewer
 
 SCHEMA_VERSION = 2  # Version of the system_state schema we expect
 WEEKDAY_ABBREVIATIONS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+TRIM_LOGFILE_INTERVAL = dt.timedelta(hours=2)
 
 
 class LightingController:
     def __init__(self, config: SCConfigManager, logger: SCLogger):
         self.config = config
         self.logger = logger
+        self.logger_last_trim: dt.datetime | None = None
         self.dusk_dawn = {}
         self.schedule_map = {}
         self.input_map = {}  # A map if inputs to outputs
@@ -678,6 +680,9 @@ class LightingController:
                 self.wake_event.clear()
             self.ping_heatbeat()
 
+            # Trim the logfile if needed
+            self._trim_logfile_if_needed()
+
     def reload_config(self):
         """Apply the updated configureation settings ."""
         self.logger.log_message("Reloading configuration...", "detailed")
@@ -707,3 +712,10 @@ class LightingController:
             # Finally, re-initialise ourselves
             self._initialise()
             self.config_last_check = DateHelper.now()
+
+    def _trim_logfile_if_needed(self) -> None:
+        """Trim the logfile if needed based on time interval."""
+        if not self.logger_last_trim or (DateHelper.now() - self.logger_last_trim) >= TRIM_LOGFILE_INTERVAL:
+            self.logger.trim_logfile()
+            self.logger_last_trim = DateHelper.now()
+            self.logger.log_message("Logfile trimmed.", "debug")

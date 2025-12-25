@@ -1,5 +1,6 @@
 import gzip
 import json
+import os
 
 import requests
 from sc_utility import JSONEncoder, SCConfigManager, SCLogger
@@ -17,7 +18,9 @@ def post_state_to_web_viewer(config: SCConfigManager, logger: SCLogger, system_s
     """
     is_enabled = config.get("ViewerWebsite", "Enable", default=False)
     base_url = config.get("ViewerWebsite", "BaseURL", default=None)
-    access_key = config.get("ViewerWebsite", "AccessKey", default=None)
+    access_key = os.environ.get("VIEWER_ACCESS_KEY")
+    if not access_key:
+        access_key = config.get("ViewerWebsite", "AccessKey", default=None)
     timeout_wait = config.get("ViewerWebsite", "APITimeout", default=5)
 
     if not is_enabled or base_url is None:

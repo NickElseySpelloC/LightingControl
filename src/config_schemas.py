@@ -21,9 +21,6 @@ class ConfigSchema:
                 "schema": {
                     "AppName": {"type": "string", "required": False, "nullable": True},
                     "CheckInterval": {"type": "number", "required": False, "nullable": True},
-                    "WebsiteBaseURL": {"type": "string", "required": False, "nullable": True},
-                    "WebsiteAccessKey": {"type": "string", "required": False, "nullable": True},
-                    "WebsiteTimeout": {"type": "number", "required": False, "nullable": True},
                 },
             },
             "ViewerWebsite": {

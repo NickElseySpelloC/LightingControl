@@ -166,7 +166,7 @@ HeartbeatMonitor:
 | AppName | The name for your installation, used in log files and the web app. |
 | CheckInterval | How often to check the schedules to see if a switch needs to change. Recommend 60 seconds. |
 | WebsiteBaseURL | If you have the PowerControllerViewer web app installed and running (see page 11), then enter the URL for the home page here. Assuming this is on the same machine as this installation, this will typically be http://127.0.0.1:8000. This app uses this URL to pass device state information to the web site. |
-| WebsiteAccessKey | If you have configured an access key for the PowerControllerViewer, configure it here.  |
+| WebsiteAccessKey | If you have configured an access key for the PowerControllerViewer, configure it here. Alternatively, set the VIEWER_ACCESS_KEY environment variable. |
 | WebsiteTimeout | How long to wait for a reponse from the PowerControllerViewer when posting state information. |
 
 ### Section: ShellyDevices
@@ -251,8 +251,8 @@ Optionally map a Shelly relay input to a switch, switch group or all outputs by 
 at the EnergyUsed entries for the last 7 days in the system_state.json file for your average usage. Set to blank or 0 to disable. | 
 | SMTPServer | The SMTP host name that supports TLS encryption. If using a Google account, set to smtp.gmail.com |
 | SMTPPort | The port number to use to connect to the SMTP server. If using a Google account, set to 587 |
-| SMTPUsername | Your username used to login to the SMTP server. If using a Google account, set to your Google email address. |
-| SMTPPassword | The password used to login to the SMTP server. If using a Google account, create an app password for the app at https://myaccount.google.com/apppasswords  |
+| SMTPUsername | Your username used to login to the SMTP server. Alternatively, set the SMTP_USERNAME environment variable. If using a Google account, set to your Google email address. |
+| SMTPPassword | The password used to login to the SMTP server. Alternatively, set the SMTP_PASSWORD environment variable. If using a Google account, create an app password for the PowerController at https://myaccount.google.com/apppasswords  |
 | SubjectPrefix | Optional. If set, the app will add this text to the start of any email subject line for emails it sends. |
 
 ### Section: ViewerWebsite

@@ -92,13 +92,13 @@ Files:
 
 # Enter your settings here if you want to be emailed when there's a critical error 
 Email:
-  EnableEmail: True
-  SendEmailsTo: <Your email address here>
-  SMTPServer: <Your SMTP server here>
-  SMTPPort: 587
-  SMTPUsername: <Your SMTP username here>
-  SMTPPassword: <Your SMTP password here>
-  SubjectPrefix: 
+  EnableEmail: True                         # Set to True to enable email notifications 
+  SendEmailsTo: <Your email address here>   # The email address to send notifications to
+  SMTPServer: <Your SMTP server here>       # The SMTP server to use to send the email
+  SMTPPort: 587                             # The SMTP server port
+  SMTPUsername: <Your SMTP username here>   # The SMTP username. Alternatively, set the SMTP_USERNAME environment variable.
+  SMTPPassword: <Your SMTP password here>   # The SMTP password or app password. Alternatively, set the SMTP_PASSWORD environment variable.
+  SubjectPrefix: "[My Lights]: "            # A prefix to add to the email subject line
 
 
 ViewerWebsite:
@@ -106,6 +106,7 @@ ViewerWebsite:
   Enable: True
   # Base URL for the PowerControllerViewer website to post state information to
   BaseURL: http://127.0.0.1:8000
+  AccessKey: <Your website API key here>  # The access key for the PowerControllerViewer app. Alternatively, set the VIEWER_ACCESS_KEY environment variable.
   APITimeout: 20
   # How often to post the state to the web viewer app (in seconds)
   Frequency: 10
