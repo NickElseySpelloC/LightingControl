@@ -9,7 +9,7 @@ launch_path="src/main.py"
 dependencies = [
     "astral>=3.2",
     "pytz>=2025.2",
-    "sc-utility>=2.6.8",
+    "sc-utility<=2.5.7",
 ]
 
 [dev.env.sync]
