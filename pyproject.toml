@@ -9,5 +9,14 @@ launch_path="src/main.py"
 dependencies = [
     "astral>=3.2",
     "pytz>=2025.2",
-    "sc-utility>=2.4.8",
+    "sc-utility>=2.6.8",
+]
+
+[dev.env.sync]
+remote="~/Library/CloudStorage/Dropbox/Development/dev_setup/app_config/LightingControl"
+patterns = [
+    ".env",
+    "config.yaml",
+    "system_state.json",
+    "logs/*"
 ]

@@ -28,3 +28,4 @@ hold
 logs/*
 config.yaml
 simulation_data
+saved_data
