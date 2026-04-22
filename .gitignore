@@ -29,3 +29,4 @@ logs/*
 config.yaml
 simulation_data
 saved_data
+system_state.json

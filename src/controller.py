@@ -507,6 +507,8 @@ class LightingController:
                     self.logger.log_message(f"Changing state of switch '{output_control}' from {state['OutputState']} to {state['ScheduledState']} due to schedule {state['Schedule']}", "detailed")
                     state["OutputState"] = state["ScheduledState"]
                     self._record_switch_event(switch=output_control, state=state["OutputState"], schedule_name=state["Schedule"])
+
+                self.logger.log_message(f"Switch '{output_control}' is currently {state['OutputState']}", "debug")
             else:
                 self.logger.log_message(f"Switch '{output_control}' is offline, skipping state change", "debug")
 
