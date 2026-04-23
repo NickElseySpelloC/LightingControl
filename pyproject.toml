@@ -1,6 +1,6 @@
 [project]
 name = "LightingControl"
-version = "1.0.3"
+version = "1.1.0"
 description = "Control multiple lights using Shelly smart switches"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -9,7 +9,8 @@ launch_path="src/main.py"
 dependencies = [
     "astral>=3.2",
     "pytz>=2025.2",
-    "sc-utility>=2.6.8",
+    "sc-foundation-services>=3.0.3",
+    "sc-smart-device>=3.0.2",
 ]
 
 [dev.env.sync]
@@ -18,5 +19,6 @@ patterns = [
     ".env",
     "config.yaml",
     "system_state.json",
-    "logs/*"
+    "logs/*",
+    ".vscode/*.json"
 ]

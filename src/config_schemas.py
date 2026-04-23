@@ -34,7 +34,7 @@ class ConfigSchema:
                     "Frequency": {"type": "number", "required": False, "nullable": True, "min": 1, "max": 3600},
                 },
             },
-            "ShellyDevices": {
+            "SCSmartDevices": {
                 "schema": {
                     "Devices": {
                         "schema": {

@@ -5,7 +5,9 @@ import signal
 import sys
 from functools import partial
 
-from sc_utility import SCConfigManager, SCLogger
+from mergedeep import merge
+from sc_foundation import SCConfigManager, SCLogger
+from sc_smart_device import smart_devices_validator
 
 from config_schemas import ConfigSchema
 from controller import LightingController
@@ -46,11 +48,15 @@ def main():
     # Get our default schema, validation schema, and placeholders
     schemas = ConfigSchema()
 
+    # Merge the SmartDevices validation schema with the default validation schema
+    merged_schema = merge({}, smart_devices_validator, schemas.validation)
+    assert isinstance(merged_schema, dict), "Merged schema should be type dict"
+
     # Initialize the SC_ConfigManager class
     try:
         config = SCConfigManager(
             config_file=CONFIG_FILE,
-            validation_schema=schemas.validation,
+            validation_schema=merged_schema,
             placeholders=schemas.placeholders
         )
     except RuntimeError as e:

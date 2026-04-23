@@ -3,7 +3,7 @@ import json
 import os
 
 import requests
-from sc_utility import JSONEncoder, SCConfigManager, SCLogger
+from sc_foundation import JSONEncoder, SCConfigManager, SCLogger
 
 HTTP_STATUS_FORBIDDEN = 403
 

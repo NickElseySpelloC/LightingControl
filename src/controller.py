@@ -11,14 +11,14 @@ import pytz
 import requests
 from astral import LocationInfo
 from astral.sun import sun
-from sc_utility import (
+from sc_foundation import (
     DateHelper,
     JSONEncoder,
     SCCommon,
     SCConfigManager,
     SCLogger,
-    ShellyControl,
 )
+from sc_smart_device import SCSmartDevice
 
 from post_state_to_web_viewer import post_state_to_web_viewer
 
@@ -44,15 +44,16 @@ class LightingController:
 
         # Initialize the ShellyControl class
         # Create an instance of the ShellyControl class
-        shelly_settings = config.get_shelly_settings()
-        if shelly_settings is None:
-            logger.log_fatal_error("No Shelly settings found in the configuration file.")
+        smart_switch_settings = config.get("SCSmartDevices")
+
+        if smart_switch_settings is None:
+            logger.log_fatal_error("No SmartDevices settings found in the configuration file.")
             return
         try:
-            assert isinstance(shelly_settings, dict)
-            self.shelly_control = ShellyControl(logger, shelly_settings, self.wake_event)
+            assert isinstance(smart_switch_settings, dict)
+            self.smart_device_control = SCSmartDevice(logger, smart_switch_settings, self.wake_event)
         except RuntimeError as e:
-            logger.log_fatal_error(f"Shelly control initialization error: {e}")
+            logger.log_fatal_error(f"Smart device control initialization error: {e}")
             return
 
         self._initialise()
@@ -87,8 +88,8 @@ class LightingController:
         if shelly_device_name:
             # Get the tz, lat and long from the specified Shelly device
             try:
-                device = self.shelly_control.get_device(shelly_device_name)
-                shelly_loc = self.shelly_control.get_device_location(device)
+                device = self.smart_device_control.get_device(shelly_device_name)
+                shelly_loc = self.smart_device_control.get_device_location(device)
                 if shelly_loc:
                     tz = shelly_loc.get("tz")
                     lat = shelly_loc.get("lat")
@@ -133,14 +134,16 @@ class LightingController:
         assignments = {}
         group_map = {}
 
-        shelly_outputs = self.shelly_control.outputs
+        shelly_outputs = self.smart_device_control.outputs
         if not isinstance(shelly_outputs, list) or len(shelly_outputs) == 0:
             self.logger.log_message("No Shelly outputs configured.", "warning")
             return assignments
 
         for output in shelly_outputs:
             name = output.get("Name")
-            group = output.get("Group")
+            assert name is not None, "Output component missing 'Name' field"
+            output_component = self.smart_device_control.get_device_component("output", name)
+            group = output_component.get("Group")
             if group:
                 group_map.setdefault(group, []).append(name)
             assignments[name] = None
@@ -191,7 +194,7 @@ class LightingController:
         assignments = {}
         group_map = {}
 
-        shelly_outputs = self.shelly_control.outputs
+        shelly_outputs = self.smart_device_control.outputs
         if not isinstance(shelly_outputs, list) or len(shelly_outputs) == 0:
             self.logger.log_message("No Shelly outputs configured.", "warning")
             return assignments
@@ -199,7 +202,10 @@ class LightingController:
         # Build group map for outputs
         for output in shelly_outputs:
             name = output.get("Name")
-            group = output.get("Group")
+            assert name is not None, "Output component missing 'Name' field"
+            output_component = self.smart_device_control.get_device_component("output", name)
+            group = output_component.get("Group")
+
             if group:
                 group_map.setdefault(group, []).append(name)
             assignments[name] = None
@@ -326,7 +332,7 @@ class LightingController:
         """Shutdown the controller, performing any necessary cleanup."""
         self.logger.log_message("Shutting down Lighting Controller...", "summary")
         self._save_state()
-        self.shelly_control.shutdown()
+        self.smart_device_control.shutdown()
 
     @staticmethod
     def _generate_offset_key(schedule_name: str, event_index: int, mode: str) -> str:
@@ -365,7 +371,7 @@ class LightingController:
             state_entry = {
                 "Switch": switch,
                 "Schedule": schedule_name,
-                "ScheduledState": self._evaluate_schedule(schedule, now, weekday_str),
+                "ScheduledState": self._evaluate_schedule_with_detail(schedule, now, weekday_str)["state"],
                 "Input": self.input_map.get(switch),
                 "InputState": None,     # State of the input switch - to be set by the change_switch_states() method
                 "OutputState": None     # Actual state of the output switch - to be set by the change_switch_states() method
@@ -392,8 +398,46 @@ class LightingController:
                 return schedule
         return None
 
-    def _evaluate_schedule(self, schedule: dict, now: dt.datetime, weekday_str: str) -> str:
-        """Evaluate a schedule to determine if the switch should be ON or OFF.
+    def summarise_schedule_evaluations(self):
+        """Log a one-time summary of how each unique schedule currently evaluates.
+
+        This avoids duplicate log entries when multiple switches use the same schedule.
+        """
+        if not self.schedule_map:
+            return
+
+        # Get unique schedules
+        unique_schedules = set(self.schedule_map.values())
+        now = DateHelper.now()
+        weekday_str = WEEKDAY_ABBREVIATIONS[now.weekday()]
+
+        evaluations = []
+        for schedule_name in sorted(unique_schedules):
+            schedule = self._get_schedule_by_name(schedule_name)
+            if schedule:
+                # Evaluate with detailed information
+                detail = self._evaluate_schedule_with_detail(schedule, now, weekday_str)
+                if detail["state"] == "ON":
+                    evaluations.append(f"{schedule_name}: {detail['state']} (event {detail['event_idx']}: {detail['on_time']}-{detail['off_time']})")
+                else:
+                    evaluations.append(f"{schedule_name}: {detail['state']}")
+
+        if evaluations:
+            self.logger.log_message(f"Schedule evaluations - {', '.join(evaluations)}", "debug")
+
+    def summarise_switch_states(self):
+        """Log a summary of the current switch states."""
+        if not self.switch_states:
+            return
+
+        summaries = []
+        for state in self.switch_states:
+            summaries.append(f"   {state['Switch']} on schedule {state['Schedule']} is {state['OutputState']}")
+
+        self.logger.log_message(f"Current switch states - \n{'\n'.join(summaries)}", "debug")
+
+    def _evaluate_schedule_with_detail(self, schedule: dict, now: dt.datetime, weekday_str: str) -> dict:
+        """Evaluate a schedule and return detailed information about the evaluation.
 
         Args:
             schedule (dict): The schedule to evaluate.
@@ -401,14 +445,14 @@ class LightingController:
             weekday_str (str): The current weekday as a string.
 
         Returns:
-            str: "ON" if the switch should be ON, "OFF" otherwise.
+            dict: A dictionary with 'state', 'event_idx', 'on_time', 'off_time' keys.
         """
         for idx, event in enumerate(schedule.get("Events", [])):
             days = event.get("DaysOfWeek", "All")
             if days != "All" and weekday_str not in [d.strip() for d in days.split(",")]:
                 continue
 
-            # Check if today falls within any specified DatesOff range which states that the switch should be OFF
+            # Check if today falls within any specified DatesOff range
             dates_off_list = event.get("DatesOff", [])
             if dates_off_list and len(dates_off_list) > 0:
                 for rng in event.get("DatesOff", []):
@@ -416,7 +460,7 @@ class LightingController:
                         start = rng["StartDate"]
                         end = rng["EndDate"]
                         if start <= DateHelper.today() <= end:
-                            return "OFF"
+                            return {"state": "OFF", "reason": "DatesOff"}
                     except (KeyError, TypeError) as e:
                         self.logger.log_message(f"Invalid StartDate and/or EndDate in the DatesOff range: {rng} — {e}", "error")
                         continue
@@ -427,14 +471,13 @@ class LightingController:
             if on_time is None or off_time is None:
                 continue
 
-            self.logger.log_message(f"Schedule '{schedule['Name']}' as at {now.time().strftime('%H:%M')} evaluates as: On: {on_time.strftime('%H:%M')}, Off: {off_time.strftime('%H:%M')}", "debug")
             if on_time < off_time:
                 if on_time <= now.time() < off_time:
-                    return "ON"
+                    return {"state": "ON", "event_idx": idx, "on_time": on_time, "off_time": off_time}
             elif now.time() >= on_time or now.time() < off_time:
-                return "ON"
+                return {"state": "ON", "event_idx": idx, "on_time": on_time, "off_time": off_time}
 
-        return "OFF"
+        return {"state": "OFF", "reason": "no matching events"}
 
     def change_switch_states(self, event: dict | None = None):
         """Change the switch states based on the evaluated switch states.
@@ -446,7 +489,7 @@ class LightingController:
         """
         # First refresh the status of all devices
         try:
-            self.shelly_control.refresh_all_device_statuses()
+            self.smart_device_control.refresh_all_device_statuses()
         except RuntimeError as e:
             self.logger.log_message(f"Failed to refresh device statuses: {e}", "error")
             return
@@ -456,14 +499,14 @@ class LightingController:
             input_control = state["Input"]
 
             # See what the current state of the outputs is
-            switch_component = self.shelly_control.get_device_component("output", output_control)
+            switch_component = self.smart_device_control.get_device_component("output", output_control)
             assert switch_component is not None, f"Output component '{output_control}' not found in Shelly outputs"
-            if self.shelly_control.is_device_online(switch_component):
+            if self.smart_device_control.is_device_online(switch_component):
                 state["OutputState"] = "ON" if switch_component.get("State") else "OFF"
 
                 # If the switch has an associated input control, we need to check its state as well
                 if input_control:
-                    input_component = self.shelly_control.get_device_component("input", input_control)
+                    input_component = self.smart_device_control.get_device_component("input", input_control)
                     input_state = "ON" if input_component.get("State") else "OFF"
                     state["InputState"] = input_state  # Store the input state in the state entry
 
@@ -487,7 +530,7 @@ class LightingController:
                 if state["InputState"] == "ON" and state["ScheduledState"] == "OFF":
                     if state["OutputState"] == "OFF":   # Change is needed
                         self.logger.log_message(f"Input '{input_control}' is ON, overriding the schedule. Turning on switch '{output_control}'", "detailed")
-                        self.shelly_control.change_output(switch_component, True)
+                        self.smart_device_control.change_output(switch_component, True)
                         state["OutputState"] = "ON"
                         self._record_switch_event(switch=output_control, state=state["OutputState"], input_name=input_control, webhook_state=webhook_event)
                     continue
@@ -496,19 +539,18 @@ class LightingController:
                 if state["InputState"] == "OFF" and state["ScheduledState"] == "OFF":
                     if state["OutputState"] == "ON":
                         self.logger.log_message(f"Input '{input_control}' is OFF, reverting to the schedule. Turning off switch '{output_control}'", "detailed")
-                        self.shelly_control.change_output(switch_component, False)
+                        self.smart_device_control.change_output(switch_component, False)
                         state["OutputState"] = "OFF"
                         self._record_switch_event(switch=output_control, state=state["OutputState"], input_name=input_control, webhook_state=webhook_event)
                     continue
 
                 # Otherwise see if we need to turn on or off based on the schedule
                 if state["ScheduledState"] != state["OutputState"]:
-                    self.shelly_control.change_output(switch_component, state["ScheduledState"] == "ON")
+                    self.smart_device_control.change_output(switch_component, state["ScheduledState"] == "ON")
                     self.logger.log_message(f"Changing state of switch '{output_control}' from {state['OutputState']} to {state['ScheduledState']} due to schedule {state['Schedule']}", "detailed")
                     state["OutputState"] = state["ScheduledState"]
                     self._record_switch_event(switch=output_control, state=state["OutputState"], schedule_name=state["Schedule"])
 
-                self.logger.log_message(f"Switch '{output_control}' is currently {state['OutputState']}", "debug")
             else:
                 self.logger.log_message(f"Switch '{output_control}' is offline, skipping state change", "debug")
 
@@ -619,7 +661,7 @@ class LightingController:
             # return dt.datetime.strptime(offset_time, "%H:%M:%S").replace(tzinfo=local_tz).time()
         return base_time
 
-    def ping_heatbeat(self, is_fail: bool | None = None) -> bool:  # noqa: FBT001
+    def ping_heatbeat(self, is_fail: bool | None = None) -> bool:
         """Ping the heartbeat URL to check if the service is available.
 
         Args:
@@ -664,8 +706,11 @@ class LightingController:
             if config_timestamp:
                 self.reload_config()
 
+            # To DO: Call function to summarise how each schedule evaluates
+            self.summarise_schedule_evaluations()
             self.evaluate_switch_states()
             self.change_switch_states()
+            self.summarise_switch_states()
             self._save_state()  # Save the latest state to the file including any switch change events
             self.wake_event.wait(timeout=self.check_interval)
             # Clear the event so future waits block again
@@ -673,7 +718,7 @@ class LightingController:
 
                 # We were woken by a webhook call
                 while True:
-                    event = self.shelly_control.pull_webhook_event()
+                    event = self.smart_device_control.pull_webhook_event()
                     if not event:
                         break
                     event_name = event.get("Event")
@@ -699,13 +744,13 @@ class LightingController:
             if email_settings:
                 self.logger.register_email_settings(email_settings)
 
-            # And finally reinitialise the shelly switches
-            shelly_settings = self.config.get_shelly_settings()
-            if shelly_settings is None:
-                self.logger.log_fatal_error("No Shelly settings found in the configuration file.")
+            # And finally reinitialise the smart devices
+            smart_switch_settings = self.config.get("SCSmartDevices")
+            if smart_switch_settings is None:
+                self.logger.log_fatal_error("No smart device settings found in the configuration file.")
                 return
-            # assert isinstance(shelly_settings, dict)
-            self.shelly_control.initialize_settings(device_settings=shelly_settings, refresh_status=True)
+            assert isinstance(smart_switch_settings, dict)
+            self.smart_device_control.initialize_settings(device_settings=smart_switch_settings, refresh_status=True)
 
         except RuntimeError as e:
             self.logger.log_fatal_error(f"Error reloading and applying configuration changes: {e}")
