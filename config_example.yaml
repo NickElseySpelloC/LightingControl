@@ -8,20 +8,30 @@ General:
 
 
 # Use this section to configure your Shelly devices used to control the lights
-# See this page for more information: https://nickelseyspelloc.github.io/sc_utility/guide/shelly_control/
-ShellyDevices:
+# See this page for more information: https://nickelseyspelloc.github.io/sc-smart-device/
+SCSmartDevices:
   ResponseTimeout: 3
   RetryCount: 1
   RetryDelay: 2
   PingAllowed: True
-  WebhooksEnabled: True
-  WebhookHost: 192.168.1.99
-  WebhookPort: 8787
-  WebhookPath: /shelly/webhook  
+  ShellyWebhooks:
+    Enabled: True
+    Host: 192.168.86.47
+    Port: 8787
+    Path: /shelly/webhook
+    DefaultWebhooks:
+      Inputs:
+        - input.toggle_on
+        - input.toggle_off
   Devices:
     - Name: Downstairs Lights
       Model: Shelly2PMG3
       Simulate: False
+      Inputs:
+        - Name: "Living Room Input"
+          Webhooks: True
+        - Name: "Driveway Input"
+          Webhooks: True
       Outputs:
         - Name: "Living Room"
         - Name: "Kitchen"
@@ -48,6 +58,14 @@ Location:
   Longitude: 
 
 
+# Maps the schedules to switches and switch groups
+LightingControl:
+  - Type: Default
+    Schedule: Inside Lighting
+  - Type: Switch Group
+    Target: External Lights
+    Schedule: Dusk to Dawn
+
 # Define one or more schedules for controlling the lights
 Schedules:
   - Name: Inside Lighting
@@ -68,13 +86,16 @@ Schedules:
         - StartDate: 2025-09-01
           EndDate: 2025-09-10
   
-# Maps the schedules to switches and switch groups
-LightingControl:
-  - Type: Default
-    Schedule: Inside Lighting
+
+# Optional. Map Shelly inputs to lighting control actions. If an input is mapped to a switch or switch group 
+# then the lights in that target will be On when the input is on, regardless of the schedule 
+InputControls:
+  - Type: Switch   
+    Target: Living Room
+    Input: Living Room Input
   - Type: Switch Group
-    Target: External Lights
-    Schedule: Dusk to Dawn
+    Target: Nighttime
+    Input: Driveway Input
 
 
 Files:
@@ -91,14 +112,13 @@ Files:
 
 
 # Enter your settings here if you want to be emailed when there's a critical error 
+# Set the SMTPUsername and SMTPPassword in your .env file and reference them here for better security
 Email:
-  EnableEmail: True                         # Set to True to enable email notifications 
-  SendEmailsTo: <Your email address here>   # The email address to send notifications to
-  SMTPServer: <Your SMTP server here>       # The SMTP server to use to send the email
-  SMTPPort: 587                             # The SMTP server port
-  SMTPUsername: <Your SMTP username here>   # The SMTP username. Alternatively, set the SMTP_USERNAME environment variable.
-  SMTPPassword: <Your SMTP password here>   # The SMTP password or app password. Alternatively, set the SMTP_PASSWORD environment variable.
-  SubjectPrefix: "[My Lights]: "            # A prefix to add to the email subject line
+  EnableEmail: True
+  SendEmailsTo: <Your email address here>
+  SMTPServer: <Your SMTP server here>
+  SMTPPort: 587
+  SubjectPrefix: 
 
 
 ViewerWebsite:
@@ -106,7 +126,6 @@ ViewerWebsite:
   Enable: True
   # Base URL for the PowerControllerViewer website to post state information to
   BaseURL: http://127.0.0.1:8000
-  AccessKey: <Your website API key here>  # The access key for the PowerControllerViewer app. Alternatively, set the VIEWER_ACCESS_KEY environment variable.
   APITimeout: 20
   # How often to post the state to the web viewer app (in seconds)
   Frequency: 10

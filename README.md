@@ -1,6 +1,6 @@
 # Lighting Control Overview
 
-The Lighting Control app is a Python-based automation tool that allowa you to control lights (and other switched) devices on a flexible schedule. Device switching is done using the [ShellyControl library](https://nickelseyspelloc.github.io/sc_utility/guide/shelly_control/) which supports a wide range of smart switch devices. 
+The Lighting Control app is a Python-based automation tool that allowa you to control lights (and other switched) devices on a flexible schedule. Device switching is done using the [Smart Device library](https://github.com/NickElseySpelloC/sc-smart-device/) which supports a wide range of smart switch devices. 
 
 ## Features
 * Lights can be added to groups.
@@ -18,19 +18,14 @@ The Lighting Control app is a Python-based automation tool that allowa you to co
 # Installation & Setup
 ## Prerequisites
 * Python 3.x installed:
-macOS: `brew install python3`
-Windows: `inget install python3 --source winget --scope machine`
+`brew install python3`
 * UV for Python installed:
-macOS: 'brew install uvicorn'
-Windows: ``pip install uv`
+`brew install uvicorn`
 
 The shell script used to run the app (*launch.sh*) is uses the *uv sync* command to ensure that all the prerequitie Python packages are installed in the virtual environment.
 
 ## Running on Mac
 If you're running the Python script on macOS, you need to allow the calling application (Terminal, Visual Studio) to access devices on the local network: *System Settings > Privacy and Security > Local Network*
-
-## Running on Windows
-This hasn't been tested yet.
 
 # Configuration File 
 The script uses the *config.yaml* YAML file for configuration. An example of included with the project (*config.yaml.example*). Copy this to *config.yaml* before running the app for the first time.  Here's an example config file:
@@ -46,20 +41,30 @@ General:
 
 
 # Use this section to configure your Shelly devices used to control the lights
-# See this page for more information: https://nickelseyspelloc.github.io/sc_utility/guide/shelly_control/
-ShellyDevices:
+# See this page for more information: https://nickelseyspelloc.github.io/sc-smart-device/
+SCSmartDevices:
   ResponseTimeout: 3
   RetryCount: 1
   RetryDelay: 2
   PingAllowed: True
-  WebhooksEnabled: True
-  WebhookHost: 192.168.1.99
-  WebhookPort: 8787
-  WebhookPath: /shelly/webhook  
+  ShellyWebhooks:
+    Enabled: True
+    Host: 192.168.86.47
+    Port: 8787
+    Path: /shelly/webhook
+    DefaultWebhooks:
+      Inputs:
+        - input.toggle_on
+        - input.toggle_off
   Devices:
     - Name: Downstairs Lights
       Model: Shelly2PMG3
       Simulate: False
+      Inputs:
+        - Name: "Living Room Input"
+          Webhooks: True
+        - Name: "Driveway Input"
+          Webhooks: True
       Outputs:
         - Name: "Living Room"
         - Name: "Kitchen"
@@ -86,6 +91,14 @@ Location:
   Longitude: 
 
 
+# Maps the schedules to switches and switch groups
+LightingControl:
+  - Type: Default
+    Schedule: Inside Lighting
+  - Type: Switch Group
+    Target: External Lights
+    Schedule: Dusk to Dawn
+
 # Define one or more schedules for controlling the lights
 Schedules:
   - Name: Inside Lighting
@@ -106,13 +119,16 @@ Schedules:
         - StartDate: 2025-09-01
           EndDate: 2025-09-10
   
-# Maps the schedules to switches and switch groups
-LightingControl:
-  - Type: Default
-    Schedule: Inside Lighting
+
+# Optional. Map Shelly inputs to lighting control actions. If an input is mapped to a switch or switch group 
+# then the lights in that target will be On when the input is on, regardless of the schedule 
+InputControls:
+  - Type: Switch   
+    Target: Living Room
+    Input: Living Room Input
   - Type: Switch Group
-    Target: External Lights
-    Schedule: Dusk to Dawn
+    Target: Nighttime
+    Input: Driveway Input
 
 
 Files:
@@ -129,13 +145,12 @@ Files:
 
 
 # Enter your settings here if you want to be emailed when there's a critical error 
+# Set the SMTPUsername and SMTPPassword in your .env file and reference them here for better security
 Email:
   EnableEmail: True
   SendEmailsTo: <Your email address here>
   SMTPServer: <Your SMTP server here>
   SMTPPort: 587
-  SMTPUsername: <Your SMTP username here>
-  SMTPPassword: <Your SMTP password here>
   SubjectPrefix: 
 
 
@@ -169,9 +184,9 @@ HeartbeatMonitor:
 | WebsiteAccessKey | If you have configured an access key for the PowerControllerViewer, configure it here. Alternatively, set the VIEWER_ACCESS_KEY environment variable. |
 | WebsiteTimeout | How long to wait for a reponse from the PowerControllerViewer when posting state information. |
 
-### Section: ShellyDevices
+### Section: SCSmartDevices
 
-In this section you can configure one or more Shelly Smart switches, one of which will be used to contro your pool pump or water heater and optionally monitor its energy usage. See the [Shelly Getting Started guide](https://nickelseyspelloc.github.io/sc_utility/guide/shelly_control/) for details on how to configure this section.
+In this section you can configure one or more Shelly and/or Tasmota smart switches. See the [Smart Devices library](https://nickelseyspelloc.github.io/sc-smart-device/) for details on how to configure this section.
 
 ### Section: Location
 
@@ -213,7 +228,7 @@ The table below defines the events part of a schedule. You can have any number o
 
 Maps the schedules to switches and switch groups. You can have any number of entries in this section, each one must define at least the Type and Schedule keys.
 
-**Important**: If you are configuring webhooks (in the ShellyDevices section) so that inputs can control the outout of one of more switch via this app, make sure you have the 'relay type' configured to "Detached" switch mode (in the Shelly app, go to Device > Settings Input/output settings).
+**Important**: If you are configuring webhooks (in the SCSmartDevices section) so that inputs can control the outout of one of more switch via this app, make sure you have the 'relay type' configured to "Detached" switch mode (in the Shelly app, go to Device > Settings Input/output settings).
 
 | Parameter | Description | 
 |:--|:--|
@@ -278,12 +293,13 @@ Use this section to configure integration with the PowerControllerViewer app - s
 
 # Setting up the Smart Switch
 
-The Power Controller is currently designed to physically start or stop the pool device via Shelly Smart Switch. This is a relay that can be connected to your local Wi-Fi network and controlled remotely via an API call. A detailed setup guide is beyond the scope of this document, but the brief steps are as follows:
-* Purchase a Shelly Smart Switch. See the [Models Library](https://nickelseyspelloc.github.io/sc_utility/guide/shelly_models_list/) for a list of supported models and which of these have an energy meter built in.
-* Install the switch so that the relay output controls power to your device. 
-* Download the Shelly App from the app store (links on [this page](https://www.shelly.com/pages/shelly-app)) and get the switch setup via the app so that you can turn the relay on and off via Wi-Fi (not Bluetooth).
-* Update the ShellyDevices section of your *config.yaml* file. 
-* If possible, create a DHCP reservation for the Shelly device in your local router so that the IP doesn't change.
+The Power Controller is currently designed to physically start or stop the pool device via Shelly and/or Tasmota smart switches. This is a relay that can be connected to your local Wi-Fi network and controlled remotely via an API call. A detailed setup guide is beyond the scope of this document, but the brief steps are as follows:
+* Purchase a Smart Switch. 
+  * For Shelly devices, see the [Models Library](https://nickelseyspelloc.github.io/sc-smart-device/shelly_models_list/) for a list of supported models and which of these have an energy meter built in.
+  * For Tasmota devices, we have only tested with this device so far: `ESP32-C3 AU Plug V3`
+* Install and configure the switch so that the relay output controls power to your device. Note the assigned IP address and model.
+* If possible, create a DHCP reservation for the device in your local router so that the IP doesn't change.
+* Update the SCSmartDevices section of your *config.yaml* file. See [Smart Devices library](https://nickelseyspelloc.github.io/sc-smart-device/) for details on how to configure this section.
 
 # Logs and Data Files
 
