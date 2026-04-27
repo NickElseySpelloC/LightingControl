@@ -490,7 +490,7 @@ class LightingController:
         # First refresh the status of all devices
         try:
             self.smart_device_control.refresh_all_device_statuses()
-        except RuntimeError as e:
+        except (TimeoutError, RuntimeError) as e:
             self.logger.log_message(f"Failed to refresh device statuses: {e}", "error")
             return
 
