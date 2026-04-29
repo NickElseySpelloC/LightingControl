@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(gh issue *)",
+      "Bash(xargs cat *)",
+      "Bash(uv sync *)",
+      "Bash(uv run python -c ' *)",
+      "Bash(python -c \"import sc_smart_device; print\\([x for x in dir\\(sc_smart_device\\) if not x.startswith\\('_'\\)]\\)\")",
+      "Bash(uv run *)",
+      "Read(//Users/nick/dev/sc-smart-device/**)"
+    ]
+  }
+}

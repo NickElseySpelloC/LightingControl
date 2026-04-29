@@ -21,6 +21,7 @@ class ConfigSchema:
                 "schema": {
                     "AppName": {"type": "string", "required": False, "nullable": True},
                     "CheckInterval": {"type": "number", "required": False, "nullable": True},
+                    "PrintToConsole": {"type": "boolean", "required": False, "nullable": True},
                 },
             },
             "ViewerWebsite": {
@@ -137,6 +138,19 @@ class ConfigSchema:
                 "schema": {
                     "WebsiteURL": {"type": "string", "required": False, "nullable": True},
                     "HeartbeatTimeout": {"type": "number", "required": False, "nullable": True, "min": 1, "max": 60},
+                },
+            },
+            "Website": {
+                "type": "dict",
+                "required": False,
+                "nullable": True,
+                "schema": {
+                    "Enable": {"type": "boolean", "required": False, "nullable": True},
+                    "HostingIP": {"type": "string", "required": False, "nullable": True},
+                    "Port": {"type": "number", "required": False, "nullable": True, "min": 1, "max": 65535},
+                    "AccessKey": {"type": "string", "required": False, "nullable": True},
+                    "DebugMode": {"type": "boolean", "required": False, "nullable": True},
+                    "PageAutoRefresh": {"type": "number", "required": False, "nullable": True, "min": 0, "max": 3600},
                 },
             },
         }

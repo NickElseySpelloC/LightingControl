@@ -4,13 +4,11 @@ import json
 import operator
 import random
 import re
-import threading
+from collections.abc import Callable
 from pathlib import Path
+from threading import Event, RLock
 
-import pytz
 import requests
-from astral import LocationInfo
-from astral.sun import sun
 from sc_foundation import (
     DateHelper,
     JSONEncoder,
@@ -18,279 +16,398 @@ from sc_foundation import (
     SCConfigManager,
     SCLogger,
 )
-from sc_smart_device import SCSmartDevice
+from sc_smart_device import (
+    DeviceSequenceRequest,
+    DeviceStep,
+    SmartDeviceWorker,
+    StepKind,
+)
 
+from enumerations import AppMode, StateReasonOff, StateReasonOn, SystemState
 from post_state_to_web_viewer import post_state_to_web_viewer
 
 SCHEMA_VERSION = 2  # Version of the system_state schema we expect
 WEEKDAY_ABBREVIATIONS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 TRIM_LOGFILE_INTERVAL = dt.timedelta(hours=2)
 
+# Keys that must be present in a valid state file
+_REQUIRED_STATE_KEYS = {"SchemaVersion", "StateFileType", "RandomOffsets", "SwitchEvents"}
+
 
 class LightingController:
-    def __init__(self, config: SCConfigManager, logger: SCLogger):
+    def __init__(self, config: SCConfigManager, logger: SCLogger, smart_device_worker: SmartDeviceWorker, wake_event: Event):
         self.config = config
         self.logger = logger
         self.logger_last_trim: dt.datetime | None = None
         self.dusk_dawn = {}
-        self.schedule_map = {}
-        self.input_map = {}  # A map if inputs to outputs
-        self.state_filepath = None
-        self.offset_cache = {}
-        self.switch_states = []  # The current state of each switch
-        self.switch_events = []  # List of switch change events for logging purposes. This is a list of days, and for each day, a list of events with the time, switch identifier and state change.
-        self.config_last_check = DateHelper.now()  # Last time the config file was checked for changes
-        self.wake_event = threading.Event()
+        self.groups: list[dict] = []        # Config-level groups with member switches
+        self.switch_states: list[dict] = []  # Per-switch state, includes group and webapp metadata
+        self.config_last_check = DateHelper.now()
+        self.wake_event = wake_event
+        self.smart_device_worker = smart_device_worker
 
-        # Initialize the ShellyControl class
-        # Create an instance of the ShellyControl class
-        smart_switch_settings = config.get("SCSmartDevices")
+        # Webapp notifier callback — set by main after webapp is created
+        self._webapp_notify: Callable[[], None] | None = None
 
-        if smart_switch_settings is None:
-            logger.log_fatal_error("No SmartDevices settings found in the configuration file.")
-            return
-        try:
-            assert isinstance(smart_switch_settings, dict)
-            self.smart_device_control = SCSmartDevice(logger, smart_switch_settings, self.wake_event)
-        except RuntimeError as e:
-            logger.log_fatal_error(f"Smart device control initialization error: {e}")
-            return
+        # Protects groups and switch_states for webapp reads/writes
+        self._state_lock = RLock()
+
+        # Internal maps (rebuilt by _initialise)
+        self._schedule_map: dict[str, str] = {}   # switch_name -> schedule_name
+        self._input_map: dict[str, str | None] = {}  # switch_name -> input_name | None
+
+        self.state_filepath: Path | None = None
+        self.offset_cache: dict = {}
+        self.switch_events: list = []
+        self.check_interval = 5
 
         self._initialise()
+        self._evaluate_switch_states()
 
-        self.evaluate_switch_states()   # Build the switch_states list
+    # ── Public API ────────────────────────────────────────────────────────────
+
+    def set_webapp_notifier(self, notify: Callable[[], None] | None) -> None:
+        self._webapp_notify = notify
+
+    def set_group_mode(self, group_name: str, mode: AppMode) -> bool:
+        """Set the webapp override mode for a group. Thread-safe.
+
+        When a group mode is set to ON or OFF, all member switch modes are
+        set to match and disabled. When reverted to AUTO, member switches are
+        also set to AUTO.
+
+        Returns:
+            True if the group was found.
+        """
+        with self._state_lock:
+            group = self._find_group(group_name)
+            if group is None:
+                return False
+            group["AppMode"] = mode
+            for sw_name in group["Switches"]:
+                sw = self._find_switch_state(sw_name)
+                if sw is not None:
+                    sw["AppMode"] = mode
+        self._notify_webapp()
+        return True
+
+    def set_switch_mode(self, switch_name: str, mode: AppMode) -> bool:
+        """Set the webapp override mode for an individual switch. Thread-safe.
+
+        Only has effect when the switch's group is in AUTO mode.
+
+        Returns:
+            True if the switch was found.
+        """
+        with self._state_lock:
+            sw = self._find_switch_state(switch_name)
+            if sw is None:
+                return False
+            group = self._find_group(sw.get("Group", ""))
+            if group and group["AppMode"] != AppMode.AUTO:
+                return False  # Group override takes precedence; client should not allow this
+            sw["AppMode"] = mode
+        self._notify_webapp()
+        return True
+
+    def is_valid_group(self, group_name: str) -> bool:
+        with self._state_lock:
+            return self._find_group(group_name) is not None
+
+    def is_valid_switch(self, switch_name: str) -> bool:
+        with self._state_lock:
+            return self._find_switch_state(switch_name) is not None
+
+    def get_webapp_data(self) -> dict:
+        """Return a snapshot of the current state for the webapp. Thread-safe."""
+        with self._state_lock:
+            groups_out = {}
+            for group in self.groups:
+                g_name = group["Name"]
+                switches_out = {}
+                for sw_name in group["Switches"]:
+                    sw = self._find_switch_state(sw_name)
+                    if sw is None:
+                        continue
+                    is_on = sw.get("OutputState") == "ON"
+                    switches_out[sw_name] = {
+                        "name": sw_name,
+                        "id": _make_id(sw_name),
+                        "is_on": is_on,
+                        "mode": str(sw.get("AppMode", AppMode.AUTO)),
+                        "system_state": str(sw.get("SystemState", "")),
+                        "reason": str(sw.get("StateReason", "")),
+                        "group_controls_mode": group["AppMode"] != AppMode.AUTO,
+                    }
+                groups_out[g_name] = {
+                    "name": g_name,
+                    "id": _make_id(g_name),
+                    "schedule": group.get("Schedule", ""),
+                    "scheduled_state": group.get("ScheduledState", ""),
+                    "next_change": _fmt_time(group.get("NextChange")),
+                    "mode": str(group["AppMode"]),
+                    "switches": switches_out,
+                }
+            return {"groups": groups_out}
+
+    def shutdown(self):
+        """Shutdown the controller, performing any necessary cleanup."""
+        self.logger.log_message("Shutting down Lighting Controller...", "summary")
+        self._save_state()
+
+    # ── Initialisation ────────────────────────────────────────────────────────
 
     def _initialise(self):
-        """Initialise the controller, refreshing the state and config as needed."""
-        self.dusk_dawn = self.get_dusk_dawn_times()
-        self.schedule_map = self._map_schedules_to_outputs()
-        self.input_map = self._map_inputs_to_outputs()
+        """Initialise (or re-initialise) controller state from config."""
+        self.dusk_dawn = self._get_dusk_dawn_times()
+        self._build_groups_and_maps()
         state_file = self.config.get("Files", "SavedStateFile", default="system_state.json")
         self.state_filepath = SCCommon.select_file_location(state_file)  # type: ignore[attr-defined]
         self._load_state()
-
         self.check_interval = self.config.get("General", "CheckInterval", default=5) or 5
-
         self.logger.log_message("Lighting Controller initialised successfully.", "debug")
 
-    def get_dusk_dawn_times(self) -> dict:
-        """Get the dawn and dusk times based on the location returned from the specified shelly switch or the manually configured location configuration.
-
-        Returns:
-            dict: A dictionary with 'dawn' and 'dusk' times.
-        """
-        name = "LightingControl"
+    def _get_dusk_dawn_times(self) -> dict:
+        """Return dawn/dusk times from device location or config."""
+        name = "LightingControl"  # noqa: F841
         loc_conf = self.config.get("Location", default={})
         assert isinstance(loc_conf, dict), "Location configuration must be a dictionary"
         tz = lat = lon = None
 
         shelly_device_name = loc_conf.get("UseShellyDevice")
         if shelly_device_name:
-            # Get the tz, lat and long from the specified Shelly device
-            try:
-                device = self.smart_device_control.get_device(shelly_device_name)
-                shelly_loc = self.smart_device_control.get_device_location(device)
-                if shelly_loc:
-                    tz = shelly_loc.get("tz")
-                    lat = shelly_loc.get("lat")
-                    lon = shelly_loc.get("lon")
-            except (RuntimeError, TimeoutError) as e:
-                self.logger.log_message(f"Error getting location from Shelly device {shelly_device_name}: {e}", "warning")
+            req_id = self.smart_device_worker.request_device_location(shelly_device_name)
+            self.smart_device_worker.wait_for_result(req_id, timeout=15.0)
+            location_info = self.smart_device_worker.get_location_info()
+            shelly_loc = location_info.get(shelly_device_name)
+            if shelly_loc:
+                tz = shelly_loc.get("tz")
+                lat = shelly_loc.get("lat")
+                lon = shelly_loc.get("lon")
 
-        # If we were unable to get the location from the Shelly device, see if we can extract it from the Google Maps url (if supplied)
         if tz is None:
-            tz = loc_conf["Timezone"]
-            # Extract coordinates
+            tz = loc_conf.get("Timezone")
             if "GoogleMapsURL" in loc_conf and loc_conf["GoogleMapsURL"] is not None:
                 url = loc_conf["GoogleMapsURL"]
                 match = re.search(r"@?([-]?\d+\.\d+),([-]?\d+\.\d+)", url)
                 if match:
                     lat = float(match.group(1))
                     lon = float(match.group(2))
-            else:   # Last resort, try the config values
-                lat = loc_conf["Latitude"]
-                lon = loc_conf["Longitude"]
+            else:
+                lat = loc_conf.get("Latitude")
+                lon = loc_conf.get("Longitude")
 
         if lat is None or lon is None:
-            self.logger.log_message("Latitude and longitude could not be determined, using defaults for 0°00'00\"N 0°00'00.0\"E.", "warning")
+            self.logger.log_message("Latitude/longitude could not be determined, using 0°N 0°E.", "warning")
             lat = 0.0
             lon = 0.0
 
-        # Create location object and compute times
-        location = LocationInfo(name=name, region="", timezone=tz, latitude=lat, longitude=lon)
-        s = sun(location.observer, date=DateHelper.today(), tzinfo=pytz.timezone(tz))
+        astral_info = DateHelper.get_dawn_dusk_times(latitude=lat, longitude=lon, timezone=tz)   # Issue 80
 
-        return {
-            "dawn": s["dawn"].time(),
-            "dusk": s["dusk"].time(),
+        return_obj = {
+            "dawn": astral_info["dawn"].time(),
+            "dusk": astral_info["dusk"].time(),
         }
+        return return_obj
 
-    def _map_schedules_to_outputs(self) -> dict:  # noqa: PLR0912
-        """Map schedules to Shelly outputs based on the configuration.
+    def _build_groups_and_maps(self):  # noqa: PLR0912, PLR0914, PLR0915
+        """Build self.groups, self._schedule_map, and self._input_map from config.
 
-        Returns:
-            dict: A dictionary mapping Shelly output names to their assigned schedules, or an empty dictionary if no outputs are configured.
+        Preserves existing AppMode overrides when called during reload.
         """
-        assignments = {}
-        group_map = {}
+        view = self.smart_device_worker.get_latest_status()
 
-        shelly_outputs = self.smart_device_control.outputs
-        if not isinstance(shelly_outputs, list) or len(shelly_outputs) == 0:
-            self.logger.log_message("No Shelly outputs configured.", "warning")
-            return assignments
+        # Build device-level group map: group_name -> [switch_names]
+        # Read Group directly from config — _normalize_component only copies known
+        # fields, so custom keys like Group are absent from the view snapshot.
+        device_group_map: dict[str, list[str]] = {}
+        smart_devices_cfg = self.config.get("SCSmartDevices", default={})
+        for device in (smart_devices_cfg or {}).get("Devices", []):
+            for out_cfg in device.get("Outputs", []):
+                out_name: str | None = out_cfg.get("Name")
+                dev_group: str | None = out_cfg.get("Group")
+                if out_name and dev_group:
+                    device_group_map.setdefault(dev_group, []).append(out_name)
 
-        for output in shelly_outputs:
-            name = output.get("Name")
-            assert name is not None, "Output component missing 'Name' field"
-            output_component = self.smart_device_control.get_device_component("output", name)
-            group = output_component.get("Group")
-            if group:
-                group_map.setdefault(group, []).append(name)
-            assignments[name] = None
+        all_output_names: set[str] = {out["Name"] for out in view.snapshot.outputs if "Name" in out}
+
+        # Capture existing AppMode overrides before rebuilding
+        old_group_modes: dict[str, AppMode] = {}
+        old_switch_modes: dict[str, AppMode] = {}
+        with self._state_lock:
+            for g in self.groups:
+                old_group_modes[g["Name"]] = g.get("AppMode", AppMode.AUTO)
+            for sw in self.switch_states:
+                old_switch_modes[sw["Switch"]] = sw.get("AppMode", AppMode.AUTO)
 
         lighting_controls = self.config.get("LightingControl", default=[])
-        if not isinstance(lighting_controls, list) or len(lighting_controls) == 0:
-            self.logger.log_message("No lighting controls configured.", "warning")
-            return assignments
+        if not isinstance(lighting_controls, list):
+            lighting_controls = []
+
+        # Build a full schedule assignment: switch_name -> schedule_name
+        default_schedule = next(
+            (c["Schedule"] for c in lighting_controls if c.get("Type", "").lower() == "default"),
+            None,
+        )
+        schedule_map: dict[str, str | None] = dict.fromkeys(all_output_names)
+
+        new_groups: list[dict] = []
+
+        # Default group — collects any switch not explicitly assigned below
+        default_group: dict = {
+            "Name": "Default",
+            "Schedule": default_schedule or "",
+            "Type": "default",
+            "AppMode": old_group_modes.get("Default", AppMode.AUTO),
+            "ScheduledState": "",
+            "NextChange": None,
+            "Switches": [],
+        }
 
         for control in lighting_controls:
+            ctrl_type = control.get("Type", "").lower()
             target = control.get("Target")
-            schedule = control.get("Schedule")
-            ctrl_type = control.get("Type").lower()
+            schedule = control.get("Schedule", "")
 
             if ctrl_type == "default":
                 continue
             elif ctrl_type == "switch":  # noqa: RET507
-                if assignments.get(target):
-                    self.logger.log_message(f"⚠️ Switch '{target}' already assigned to schedule '{assignments[target]}'", "warning")
-                else:
-                    assignments[target] = schedule
-            elif ctrl_type == "switch group":
-                for output in group_map.get(target, []):
-                    if assignments.get(output):
-                        self.logger.log_message(f"⚠️ Switch '{output}' (in group '{target}') already assigned to schedule '{assignments[output]}'", "warning")
+                if target in schedule_map:
+                    if schedule_map[target] is None:
+                        schedule_map[target] = schedule
                     else:
-                        assignments[output] = schedule
+                        self.logger.log_message(f"⚠️ Switch '{target}' already assigned to a schedule", "warning")
+                group: dict = {
+                    "Name": target,
+                    "Schedule": schedule,
+                    "Type": "switch",
+                    "AppMode": old_group_modes.get(target, AppMode.AUTO),
+                    "ScheduledState": "",
+                    "NextChange": None,
+                    "Switches": [target] if target else [],
+                }
+                new_groups.append(group)
+            elif ctrl_type == "switch group":
+                members = device_group_map.get(target, [])
+                for sw in members:
+                    if sw in schedule_map:
+                        if schedule_map[sw] is None:
+                            schedule_map[sw] = schedule
+                        else:
+                            self.logger.log_message(f"⚠️ Switch '{sw}' (in group '{target}') already assigned", "warning")
+                group = {
+                    "Name": target,
+                    "Schedule": schedule,
+                    "Type": "switch group",
+                    "AppMode": old_group_modes.get(target, AppMode.AUTO),
+                    "ScheduledState": "",
+                    "NextChange": None,
+                    "Switches": members,
+                }
+                new_groups.append(group)
 
-        lighting_control_config = self.config.get("LightingControl", default=[])
-        if not isinstance(lighting_control_config, list) or len(lighting_control_config) == 0:
-            self.logger.log_fatal_error("No lighting control configurations found.")
-        assert isinstance(lighting_control_config, list), "Lighting control configuration must be a list"
+        # Fill unassigned switches with the default schedule and add to Default group
+        for sw_name, sched in schedule_map.items():
+            if sched is None:
+                schedule_map[sw_name] = default_schedule
+                default_group["Switches"].append(sw_name)
 
-        default_schedule = next((c["Schedule"] for c in lighting_control_config if c.get("Type", "").lower() == "default"), None)
-        for output, schedule in assignments.items():
-            if schedule is None:
-                assignments[output] = default_schedule
+        if default_group["Switches"]:
+            new_groups.insert(0, default_group)
 
-        return assignments
-
-    def _map_inputs_to_outputs(self) -> dict:  # noqa: PLR0912
-        """
-        Map Shelly outputs to their associated inputs based on the InputControls section of the configuration.
-
-        Returns:
-            dict: A dictionary mapping output names to their assigned input names, or None if no input is mapped.
-        """
-        assignments = {}
-        group_map = {}
-
-        shelly_outputs = self.smart_device_control.outputs
-        if not isinstance(shelly_outputs, list) or len(shelly_outputs) == 0:
-            self.logger.log_message("No Shelly outputs configured.", "warning")
-            return assignments
-
-        # Build group map for outputs
-        for output in shelly_outputs:
-            name = output.get("Name")
-            assert name is not None, "Output component missing 'Name' field"
-            output_component = self.smart_device_control.get_device_component("output", name)
-            group = output_component.get("Group")
-
-            if group:
-                group_map.setdefault(group, []).append(name)
-            assignments[name] = None
-
+        # Build input map
+        input_map: dict[str, str | None] = dict.fromkeys(all_output_names)
         input_controls = self.config.get("InputControls", default=[])
-        if not isinstance(input_controls, list) or len(input_controls) == 0:
-            self.logger.log_message("No input controls configured.", "warning")
-            return assignments
+        if isinstance(input_controls, list):
+            default_input = None
+            for control in input_controls:
+                ctrl_type = control.get("Type", "").lower()
+                target = control.get("Target")
+                input_name = control.get("Input")
+                if ctrl_type == "default":
+                    default_input = input_name
+                    continue
+                if ctrl_type == "switch" and target in input_map:
+                    if input_map[target] is None:
+                        input_map[target] = input_name
+                elif ctrl_type == "switch group":
+                    for sw in device_group_map.get(target, []):
+                        if sw in input_map and input_map[sw] is None:
+                            input_map[sw] = input_name
+            if default_input:
+                for sw in input_map:  # noqa: PLC0206
+                    if input_map[sw] is None:
+                        input_map[sw] = default_input
 
-        default_input = None
-        for control in input_controls:
-            ctrl_type = control.get("Type", "").lower()
-            target = control.get("Target")
-            input_name = control.get("Input")
+        # Build the switch_states list, preserving existing AppMode values
+        new_switch_states: list[dict] = []
+        for group in new_groups:
+            for sw_name in group["Switches"]:
+                new_switch_states.append({
+                    "Switch": sw_name,
+                    "Group": group["Name"],
+                    "Schedule": schedule_map.get(sw_name, default_schedule) or "",
+                    "ScheduledState": "",
+                    "NextChange": None,
+                    "Input": input_map.get(sw_name),
+                    "InputState": None,
+                    "OutputState": None,
+                    "AppMode": old_switch_modes.get(sw_name, AppMode.AUTO),
+                    "SystemState": SystemState.SCHEDULED,
+                    "StateReason": StateReasonOff.SCHEDULED_OFF,
+                })
 
-            if ctrl_type == "default":
-                default_input = input_name
-                continue
-            if ctrl_type == "switch":
-                if assignments.get(target):
-                    self.logger.log_message(f"⚠️ Output '{target}' already assigned to input '{assignments[target]}'", "warning")
-                else:
-                    assignments[target] = input_name
-            elif ctrl_type == "switch group":
-                for output in group_map.get(target, []):
-                    if assignments.get(output):
-                        self.logger.log_message(f"⚠️ Output '{output}' (in group '{target}') already assigned to input '{assignments[output]}'", "warning")
-                    else:
-                        assignments[output] = input_name
-
-        # Map all unmapped outputs to the default input if specified
-        if default_input:
-            for output, mapped_input in assignments.items():
-                if mapped_input is None:
-                    assignments[output] = default_input
-
-        return assignments
+        with self._state_lock:
+            self.groups = new_groups
+            self._schedule_map = {sw: sched for sw, sched in schedule_map.items() if sched}  # type: ignore[misc]
+            self._input_map = input_map
+            self.switch_states = new_switch_states
 
     def _load_state(self) -> bool:
-        """Load the random offsets from the the saved state file.
+        """Load random offsets and switch events from the saved state file.
 
         Returns:
-            bool: True if the state was loaded successfully, False if it didn't exist.
+            True if loaded successfully.
         """
         assert isinstance(self.state_filepath, Path), "State file path must be a Path object"
+        if not self.state_filepath.exists():
+            return False
+        try:
+            state = JSONEncoder.read_from_file(self.state_filepath)
+            if not isinstance(state, dict):
+                return False
 
-        # If the file exists and its at least 500 bytes long
-        if self.state_filepath.exists() and self.state_filepath.stat().st_size >= 500:
-            try:
-                state = JSONEncoder.read_from_file(self.state_filepath)
-                if not state:
-                    return False
+            # Schema validation: check required keys are present
+            if not _REQUIRED_STATE_KEYS.issubset(state.keys()):
+                missing = _REQUIRED_STATE_KEYS - state.keys()
+                self.logger.log_message(f"State file missing required keys {missing}, ignoring.", "warning")
+                return False
 
-                assert isinstance(state, dict), "State file content must be a dictionary"
-                schema_version = state.get("SchemaVersion")
-                if not schema_version or schema_version < SCHEMA_VERSION:
-                    self.logger.log_fatal_error(f"State file schema version {schema_version} does not match expected version {SCHEMA_VERSION}.")
+            schema_version = state.get("SchemaVersion")
+            if not schema_version or schema_version < SCHEMA_VERSION:
+                self.logger.log_fatal_error(f"State file schema version {schema_version} does not match expected {SCHEMA_VERSION}.")
 
-                if state.get("StateFileType") != "LightingControl":
-                    self.logger.log_fatal_error(f"Invalid system state file type {state.get('StateFileType')}, cannot load file {self.state_filepath}")
+            if state.get("StateFileType") != "LightingControl":
+                self.logger.log_fatal_error(f"Invalid state file type '{state.get('StateFileType')}', cannot load {self.state_filepath}")
 
-                # Now load the RandomOffset cached values from the state file
-                self.offset_cache = state.get("RandomOffsets", {})
-
-                # Now load the SwitchEvents list from the state file
-                self.switch_events = state.get("SwitchEvents", [])
-            except json.JSONDecodeError as e:
-                self.logger.log_fatal_error(f"Failed to load state file {self.state_filepath}: {e}")
-            else:
-                return True
+            self.offset_cache = state.get("RandomOffsets", {})
+            self.switch_events = state.get("SwitchEvents", [])
+        except json.JSONDecodeError as e:
+            self.logger.log_fatal_error(f"Failed to load state file {self.state_filepath}: {e}")
+        else:
+            return True
         return False
 
     def _save_state(self):
-        """Save the current state to the state file. This includes the RandomOffsets and SwitchStates sections."""
-        # First trim any old switch events to keep only the last N days of history
+        """Save current state (random offsets, switch events) to the state file."""
         self._trim_switch_events()
-
-        # Build the JSON state file and save it
         assert isinstance(self.state_filepath, Path), "State file path must be a Path object"
-
-        # Build the object to save
         try:
             config_schedules = self.config.get("Schedules", default=[])
-            if isinstance(config_schedules, list):
-                schedules = copy.deepcopy(config_schedules)
+            schedules = copy.deepcopy(config_schedules) if isinstance(config_schedules, list) else []
+
+            with self._state_lock:
+                switch_states_copy = copy.deepcopy(self.switch_states)
 
             state_data = {
                 "SchemaVersion": SCHEMA_VERSION,
@@ -302,167 +419,341 @@ class LightingController:
                 "Dawn": self.dusk_dawn.get("dawn"),  # type: ignore  # noqa: PGH003
                 "Dusk": self.dusk_dawn.get("dusk"),  # type: ignore  # noqa: PGH003
                 "RandomOffsets": self.offset_cache,
-                "SwitchStates": self.switch_states,
+                "SwitchStates": switch_states_copy,
                 "Schedules": schedules,
                 "SwitchEvents": self.switch_events,
             }
             JSONEncoder.save_to_file(state_data, self.state_filepath)
         except (OSError, TypeError, ValueError, RuntimeError) as e:
             self.logger.log_fatal_error(f"Failed to save state file: {e}")
+            return
 
-        # Save the state to the web server if required
         post_state_to_web_viewer(self.config, self.logger, state_data)
 
     def _trim_switch_events(self):
-        """Trim the switch events to keep only the last N days of history. Also sorts the events by date and time."""
+        """Trim switch events to the last N days."""
         max_days = self.config.get("Files", "MaxDaysSwitchChangeHistory", default=30)
         assert isinstance(max_days, int), "MaxDaysSwitchChangeHistory must be an integer"
         assert max_days > 0, "MaxDaysSwitchChangeHistory must be a positive integer"
-
         cutoff_date = DateHelper.today_add_days(-max_days)
-
-        # Filter out events older than the cutoff date
-        self.switch_events = [day_event for day_event in self.switch_events if day_event["Date"] >= cutoff_date]
-        # Now sort the switch events by date and time
+        self.switch_events = [d for d in self.switch_events if d["Date"] >= cutoff_date]
         self.switch_events.sort(key=operator.itemgetter("Date"))
         for day_event in self.switch_events:
             day_event["Events"].sort(key=operator.itemgetter("Time"))
 
-    def shutdown(self):
-        """Shutdown the controller, performing any necessary cleanup."""
-        self.logger.log_message("Shutting down Lighting Controller...", "summary")
-        self._save_state()
-        self.smart_device_control.shutdown()
+    # ── Schedule evaluation ───────────────────────────────────────────────────
 
-    @staticmethod
-    def _generate_offset_key(schedule_name: str, event_index: int, mode: str) -> str:
-        """Generate a unique key for the random offset based on schedule name, event index, and mode.
+    def _evaluate_switch_states(self) -> list:  # noqa: PLR0915
+        """Evaluate desired state for every switch using the 4-level priority chain.
 
-        Args:
-            schedule_name (str): The name of the schedule.
-            event_index (int): The index of the event in the schedule.
-            mode (str): The mode, either "On" or "Off".
+        Priority (highest first):
+          1. Webapp switch override (AppMode.ON / OFF)
+          2. Webapp group override
+          3. Input switch override
+          4. Scheduled state
 
-        Returns:
-            str: A unique key formatted as "YYYY-MM-DD|ScheduleName|EventIndex|Mode".
-        """
-        today_str = DateHelper.today().isoformat()
-        return f"{today_str}|{schedule_name}|{event_index}|{mode}"
-
-    def evaluate_switch_states(self) -> list:
-        """Evaluate the current switch states based on the schedules and the current time.
+        Updates self.switch_states in-place with ScheduledState, SystemState,
+        StateReason, InputState, and NextChange. Does NOT change physical devices.
 
         Returns:
-            list: A list of dictionaries containing the switch name, schedule name, and desired state.
+            The updated switch_states list.
         """
         now = DateHelper.now()
         weekday_str = WEEKDAY_ABBREVIATIONS[now.weekday()]
-        self.switch_states.clear()
+        view = self.smart_device_worker.get_latest_status()
 
-        if not self.schedule_map:
-            self.logger.log_message("No schedules mapped to outputs.", "warning")
-            return []
+        with self._state_lock:
+            # First pass: update per-group ScheduledState and NextChange
+            for group in self.groups:
+                schedule_name = group.get("Schedule", "")
+                schedule = self._get_schedule_by_name(schedule_name)
+                if schedule:
+                    detail = self._evaluate_schedule_with_detail(schedule, now, weekday_str)
+                    group["ScheduledState"] = detail["state"]
+                    group["NextChange"] = detail.get("next_change")
 
-        for switch, schedule_name in self.schedule_map.items():
-            schedule = self._get_schedule_by_name(schedule_name)
-            if not schedule:
-                self.logger.log_fatal_error(f"Schedule '{schedule_name}' not found for switch '{switch}'.")
-                continue
-            state_entry = {
-                "Switch": switch,
-                "Schedule": schedule_name,
-                "ScheduledState": self._evaluate_schedule_with_detail(schedule, now, weekday_str)["state"],
-                "Input": self.input_map.get(switch),
-                "InputState": None,     # State of the input switch - to be set by the change_switch_states() method
-                "OutputState": None     # Actual state of the output switch - to be set by the change_switch_states() method
-            }
-            self.switch_states.append(state_entry)
+            # Second pass: evaluate each switch
+            for state in self.switch_states:
+                sw_name = state["Switch"]
+                schedule_name = state["Schedule"]
+                schedule = self._get_schedule_by_name(schedule_name)
+                if not schedule:
+                    self.logger.log_fatal_error(f"Schedule '{schedule_name}' not found for switch '{sw_name}'.")
+                    continue
+
+                detail = self._evaluate_schedule_with_detail(schedule, now, weekday_str)
+                scheduled_state = detail["state"]
+                state["ScheduledState"] = scheduled_state
+                state["NextChange"] = detail.get("next_change")
+
+                # Read input state from view
+                input_name = state.get("Input")
+                input_state: str | None = None
+                if input_name:
+                    input_id = view.get_input_id(input_name)
+                    if input_id:
+                        input_state = "ON" if view.get_input_state(input_id) else "OFF"
+                state["InputState"] = input_state
+
+                # Read webhook events for this switch's input
+                webhook_event = self._drain_webhook_events_for(input_name)
+
+                group = self._find_group(state.get("Group", ""))
+                group_mode = group["AppMode"] if group else AppMode.AUTO
+                switch_mode = state.get("AppMode", AppMode.AUTO)
+
+                # Priority 1: webapp switch override
+                if switch_mode == AppMode.ON:
+                    state["SystemState"] = SystemState.WEBAPP_SWITCH_OVERRIDE
+                    state["StateReason"] = StateReasonOn.WEBAPP_SWITCH_ON
+                    state["DesiredState"] = "ON"
+                elif switch_mode == AppMode.OFF:
+                    state["SystemState"] = SystemState.WEBAPP_SWITCH_OVERRIDE
+                    state["StateReason"] = StateReasonOff.WEBAPP_SWITCH_OFF
+                    state["DesiredState"] = "OFF"
+                # Priority 2: webapp group override
+                elif group_mode == AppMode.ON:
+                    state["SystemState"] = SystemState.WEBAPP_GROUP_OVERRIDE
+                    state["StateReason"] = StateReasonOn.WEBAPP_GROUP_ON
+                    state["DesiredState"] = "ON"
+                elif group_mode == AppMode.OFF:
+                    state["SystemState"] = SystemState.WEBAPP_GROUP_OVERRIDE
+                    state["StateReason"] = StateReasonOff.WEBAPP_GROUP_OFF
+                    state["DesiredState"] = "OFF"
+                # Priority 3: input override
+                elif input_state == "ON" and scheduled_state == "OFF":
+                    state["SystemState"] = SystemState.INPUT_OVERRIDE
+                    state["StateReason"] = StateReasonOn.INPUT_SWITCH_ON
+                    state["DesiredState"] = "ON"
+                elif input_state == "OFF" and webhook_event is None and scheduled_state == "OFF":
+                    # Input went OFF and schedule is OFF: revert
+                    state["SystemState"] = SystemState.SCHEDULED
+                    state["StateReason"] = StateReasonOff.SCHEDULED_OFF
+                    state["DesiredState"] = "OFF"
+                # Priority 4: schedule
+                elif detail.get("reason") == "DatesOff":
+                    state["SystemState"] = SystemState.DATE_OFF
+                    state["StateReason"] = StateReasonOff.DATE_OFF
+                    state["DesiredState"] = "OFF"
+                elif scheduled_state == "ON":
+                    state["SystemState"] = SystemState.SCHEDULED
+                    state["StateReason"] = StateReasonOn.SCHEDULED_ON
+                    state["DesiredState"] = "ON"
+                else:
+                    state["SystemState"] = SystemState.SCHEDULED
+                    state["StateReason"] = StateReasonOff.SCHEDULED_OFF
+                    state["DesiredState"] = "OFF"
 
         return self.switch_states
 
-    def _get_schedule_by_name(self, name: str) -> dict | None:
-        """Retrieve a schedule by its name from the configuration.
-
-        Args:
-            name (str): The name of the schedule to retrieve.
+    def _drain_webhook_events_for(self, input_name: str | None) -> str | None:
+        """Pull all pending webhook events and return the last relevant one for input_name.
 
         Returns:
-            dict: The schedule dictionary if found, or None if not found.
+            "ON", "OFF", or None if no relevant event was found.
         """
+        last_event = None
+        while True:
+            event = self.smart_device_worker._smart_device.pull_webhook_event()  # noqa: SLF001
+            if not event:
+                break
+            event_input = event.get("Component", {}).get("Name")
+            if event_input == input_name:
+                if event.get("Event") == "input.toggle_on":
+                    last_event = "ON"
+                elif event.get("Event") == "input.toggle_off":
+                    last_event = "OFF"
+        return last_event
+
+    def _change_switch_states(self):
+        """Apply any required physical switch changes based on the evaluated desired states.
+
+        Submits a REFRESH_STATUS to get fresh device state, reads back via the
+        view, then submits CHANGE_OUTPUT requests for any switch whose physical
+        state differs from the desired state.
+        """
+        # Refresh device status via the worker
+        req_id = self.smart_device_worker.request_refresh_status()
+        if not self.smart_device_worker.wait_for_result(req_id, timeout=30.0):
+            self.logger.log_message("Device status refresh timed out; skipping switch changes.", "error")
+            return
+
+        view = self.smart_device_worker.get_latest_status()
+
+        with self._state_lock:
+            for state in self.switch_states:
+                sw_name = state["Switch"]
+                desired = state.get("DesiredState", state.get("ScheduledState", "OFF"))
+
+                output_id = view.get_output_id(sw_name)
+                if not output_id:
+                    self.logger.log_message(f"Output '{sw_name}' not found in device view.", "warning")
+                    continue
+
+                device_id = view.get_output_device_id(output_id)
+                if not view.get_device_online(device_id):
+                    self.logger.log_message(f"Switch '{sw_name}' is offline, skipping.", "debug")
+                    state["OutputState"] = None
+                    state["SystemState"] = SystemState.SCHEDULED
+                    state["StateReason"] = StateReasonOff.DEVICE_OFFLINE
+                    continue
+
+                current = "ON" if view.get_output_state(output_id) else "OFF"
+                state["OutputState"] = current
+
+                if desired != current:
+                    req = DeviceSequenceRequest(
+                        steps=[DeviceStep(StepKind.CHANGE_OUTPUT, {"output_identity": sw_name, "state": desired == "ON"})],
+                        label=f"set {sw_name} {desired}",
+                    )
+                    req_id = self.smart_device_worker.submit(req)
+                    done = self.smart_device_worker.wait_for_result(req_id, timeout=10.0)
+                    if done:
+                        state["OutputState"] = desired
+                        self.logger.log_message(
+                            f"Changed '{sw_name}' from {current} to {desired} "
+                            f"({state['SystemState']}: {state['StateReason']})", "detailed"
+                        )
+                        self._record_switch_event(
+                            switch=sw_name,
+                            state=desired,
+                            schedule_name=state.get("Schedule"),
+                            input_name=state.get("Input"),
+                        )
+                    else:
+                        self.logger.log_message(f"Timed out changing switch '{sw_name}'.", "error")
+
+    # ── Main loop ─────────────────────────────────────────────────────────────
+
+    def run(self, stop_event: Event | None = None):
+        """Run the controller loop until stop_event is set."""
+        assert isinstance(self.check_interval, int), "CheckInterval must be an integer"
+        assert self.check_interval > 0, "CheckInterval must be a positive integer"
+
+        while stop_event is None or not stop_event.is_set():
+            time_now = DateHelper.now()
+            console_msg = f"Main tick at {time_now.strftime('%H:%M:%S')}"
+            self._print_to_console(console_msg)
+
+            config_timestamp = self.config.check_for_config_changes(self.config_last_check)
+            if config_timestamp:
+                self._reload_config()
+
+            self._summarise_schedule_evaluations()
+            self._evaluate_switch_states()
+            self._change_switch_states()
+            self._summarise_switch_states()
+            self._save_state()
+            self._notify_webapp()
+
+            self.wake_event.clear()
+            self.wake_event.wait(timeout=self.check_interval)
+
+            self._ping_heartbeat()
+            self._trim_logfile_if_needed()
+
+        self.shutdown()
+
+    def _reload_config(self):
+        """Re-apply updated configuration settings."""
+        self.logger.log_message("Reloading configuration...", "detailed")
+        try:
+            logger_settings = self.config.get_logger_settings()
+            self.logger.initialise_settings(logger_settings)
+            email_settings = self.config.get_email_settings()
+            if email_settings:
+                self.logger.register_email_settings(email_settings)
+            smart_switch_settings = self.config.get("SCSmartDevices")
+            if smart_switch_settings is None:
+                self.logger.log_fatal_error("No smart device settings found in the configuration file.")
+                return
+            assert isinstance(smart_switch_settings, dict)
+            self.smart_device_worker.reinitialise_settings(device_settings=smart_switch_settings)
+        except RuntimeError as e:
+            self.logger.log_fatal_error(f"Error reloading configuration: {e}")
+            return
+        else:
+            self._initialise()
+            self.config_last_check = DateHelper.now()
+
+    # ── Helpers ───────────────────────────────────────────────────────────────
+
+    def _find_group(self, name: str) -> dict | None:
+        for g in self.groups:
+            if g["Name"] == name:
+                return g
+        return None
+
+    def _find_switch_state(self, switch_name: str) -> dict | None:
+        for sw in self.switch_states:
+            if sw["Switch"] == switch_name:
+                return sw
+        return None
+
+    def _notify_webapp(self):
+        if self._webapp_notify:
+            self._webapp_notify()
+
+    def _get_schedule_by_name(self, name: str) -> dict | None:
         schedules = self.config.get("Schedules", default=[])
         if not isinstance(schedules, list):
-            self.logger.log_message("No Schedules configured in the config file.", "warning")
             return None
         for schedule in schedules:
             if schedule.get("Name") == name:
                 return schedule
         return None
 
-    def summarise_schedule_evaluations(self):
-        """Log a one-time summary of how each unique schedule currently evaluates.
-
-        This avoids duplicate log entries when multiple switches use the same schedule.
-        """
-        if not self.schedule_map:
+    def _summarise_schedule_evaluations(self):
+        if not self._schedule_map:
             return
-
-        # Get unique schedules
-        unique_schedules = set(self.schedule_map.values())
+        unique_schedules = set(self._schedule_map.values())
         now = DateHelper.now()
         weekday_str = WEEKDAY_ABBREVIATIONS[now.weekday()]
-
         evaluations = []
         for schedule_name in sorted(unique_schedules):
             schedule = self._get_schedule_by_name(schedule_name)
             if schedule:
-                # Evaluate with detailed information
                 detail = self._evaluate_schedule_with_detail(schedule, now, weekday_str)
                 if detail["state"] == "ON":
-                    evaluations.append(f"{schedule_name}: {detail['state']} (event {detail['event_idx']}: {detail['on_time']}-{detail['off_time']})")
+                    evaluations.append(f"{schedule_name}: {detail['state']} (event {detail.get('event_idx')}: {detail.get('on_time')}-{detail.get('off_time')})")
                 else:
                     evaluations.append(f"{schedule_name}: {detail['state']}")
-
         if evaluations:
             self.logger.log_message(f"Schedule evaluations - {', '.join(evaluations)}", "debug")
 
-    def summarise_switch_states(self):
-        """Log a summary of the current switch states."""
+    def _summarise_switch_states(self):
         if not self.switch_states:
             return
-
-        summaries = []
-        for state in self.switch_states:
-            summaries.append(f"   {state['Switch']} on schedule {state['Schedule']} is {state['OutputState']}")
-
+        with self._state_lock:
+            summaries = [
+                f"   {s['Switch']} ({s['SystemState']}"
+                + (f": {s['Schedule']}" if s.get("SystemState") == SystemState.SCHEDULED and s.get("Schedule") else "")
+                + f"): {s.get('OutputState', '?')}"
+                for s in self.switch_states
+            ]
         self.logger.log_message(f"Current switch states - \n{'\n'.join(summaries)}", "debug")
 
     def _evaluate_schedule_with_detail(self, schedule: dict, now: dt.datetime, weekday_str: str) -> dict:
-        """Evaluate a schedule and return detailed information about the evaluation.
-
-        Args:
-            schedule (dict): The schedule to evaluate.
-            now (datetime): The current datetime.
-            weekday_str (str): The current weekday as a string.
+        """Evaluate a schedule and return state details including next change time.
 
         Returns:
-            dict: A dictionary with 'state', 'event_idx', 'on_time', 'off_time' keys.
+            Dict with keys: state ("ON"/"OFF"), next_change (dt.time | None), reason (str | None).
         """
         for idx, event in enumerate(schedule.get("Events", [])):
             days = event.get("DaysOfWeek", "All")
             if days != "All" and weekday_str not in [d.strip() for d in days.split(",")]:
                 continue
 
-            # Check if today falls within any specified DatesOff range
             dates_off_list = event.get("DatesOff", [])
-            if dates_off_list and len(dates_off_list) > 0:
-                for rng in event.get("DatesOff", []):
+            if dates_off_list:
+                for rng in dates_off_list:
                     try:
                         start = rng["StartDate"]
                         end = rng["EndDate"]
                         if start <= DateHelper.today() <= end:
                             return {"state": "OFF", "reason": "DatesOff"}
                     except (KeyError, TypeError) as e:
-                        self.logger.log_message(f"Invalid StartDate and/or EndDate in the DatesOff range: {rng} — {e}", "error")
+                        self.logger.log_message(f"Invalid DatesOff range {rng}: {e}", "error")
                         continue
 
             on_time = self._parse_time(event["TurnOn"], event.get("RandomOffset"), schedule["Name"], idx, "On")
@@ -473,296 +764,176 @@ class LightingController:
 
             if on_time < off_time:
                 if on_time <= now.time() < off_time:
-                    return {"state": "ON", "event_idx": idx, "on_time": on_time, "off_time": off_time}
+                    return {
+                        "state": "ON", "event_idx": idx, "on_time": on_time, "off_time": off_time,
+                        "next_change": off_time,
+                    }
             elif now.time() >= on_time or now.time() < off_time:
-                return {"state": "ON", "event_idx": idx, "on_time": on_time, "off_time": off_time}
-
-        return {"state": "OFF", "reason": "no matching events"}
-
-    def change_switch_states(self, event: dict | None = None):
-        """Change the switch states based on the evaluated switch states.
-
-        This method will iterate through the evaluated switch states and change the state of each switch accordingly.
-
-        Args:
-            event (dict | None): An optional event dictionary containing information about the event that triggered the state change.
-        """
-        # First refresh the status of all devices
-        try:
-            self.smart_device_control.refresh_all_device_statuses()
-        except (TimeoutError, RuntimeError) as e:
-            self.logger.log_message(f"Failed to refresh device statuses: {e}", "error")
-            return
-
-        for state in self.switch_states:
-            output_control = state["Switch"]
-            input_control = state["Input"]
-
-            # See what the current state of the outputs is
-            switch_component = self.smart_device_control.get_device_component("output", output_control)
-            assert switch_component is not None, f"Output component '{output_control}' not found in Shelly outputs"
-            if self.smart_device_control.is_device_online(switch_component):
-                state["OutputState"] = "ON" if switch_component.get("State") else "OFF"
-
-                # If the switch has an associated input control, we need to check its state as well
-                if input_control:
-                    input_component = self.smart_device_control.get_device_component("input", input_control)
-                    input_state = "ON" if input_component.get("State") else "OFF"
-                    state["InputState"] = input_state  # Store the input state in the state entry
-
-                # If we received a webhook event that overrides the current switch state, record that as an event
-                webhook_event = None
-                if input_control and event and event.get("Component", {}).get("Name") == input_control:
-                    self.logger.log_message(f"Webhook event {event.get('Event')} received for {input_control}", "debug")
-                    if event.get("Event") == "input.toggle_on":
-                        webhook_event = "ON"
-                    elif event.get("Event") == "input.toggle_off":
-                        webhook_event = "OFF"
-
-                """We now have the following properties:
-                    state["ScheduledState"] = The output state as dictated by the schedule
-                    state["InputState"] = The current state of the input control (ON or OFF) or None if no input control is mapped
-                    webhook_event = The state of the webhook event (ON, OFF, or None)
-                    state["OutputState"] - The current state of the output control (ON or OFF)
-                """
-
-                # If input is on, overriding the schedule and output is off, turn on the switch
-                if state["InputState"] == "ON" and state["ScheduledState"] == "OFF":
-                    if state["OutputState"] == "OFF":   # Change is needed
-                        self.logger.log_message(f"Input '{input_control}' is ON, overriding the schedule. Turning on switch '{output_control}'", "detailed")
-                        self.smart_device_control.change_output(switch_component, True)
-                        state["OutputState"] = "ON"
-                        self._record_switch_event(switch=output_control, state=state["OutputState"], input_name=input_control, webhook_state=webhook_event)
-                    continue
-
-                # If input is off and the schedule is off, but the output is currently on, turn off the switch
-                if state["InputState"] == "OFF" and state["ScheduledState"] == "OFF":
-                    if state["OutputState"] == "ON":
-                        self.logger.log_message(f"Input '{input_control}' is OFF, reverting to the schedule. Turning off switch '{output_control}'", "detailed")
-                        self.smart_device_control.change_output(switch_component, False)
-                        state["OutputState"] = "OFF"
-                        self._record_switch_event(switch=output_control, state=state["OutputState"], input_name=input_control, webhook_state=webhook_event)
-                    continue
-
-                # Otherwise see if we need to turn on or off based on the schedule
-                if state["ScheduledState"] != state["OutputState"]:
-                    self.smart_device_control.change_output(switch_component, state["ScheduledState"] == "ON")
-                    self.logger.log_message(f"Changing state of switch '{output_control}' from {state['OutputState']} to {state['ScheduledState']} due to schedule {state['Schedule']}", "detailed")
-                    state["OutputState"] = state["ScheduledState"]
-                    self._record_switch_event(switch=output_control, state=state["OutputState"], schedule_name=state["Schedule"])
-
-            else:
-                self.logger.log_message(f"Switch '{output_control}' is offline, skipping state change", "debug")
-
-    def _record_switch_event(self, switch: str, state: str, schedule_name: str | None = None, input_name: str | None = None, webhook_state: str | None = None):
-        """Record a switch change event. You must supply either a schedule or an input.
-
-        Args:
-            switch (str): The name of the switch.
-            state (str): The new state of the switch.
-            schedule_name (str): The name of the schedule (if any)
-            input_name (str): The name of the input control (if any).
-            webhook_state (str): The state of the webhook event (if any).
-        """
-        event_date = DateHelper.today()
-        # Ensure the switch_events list has an entry for today somewhere in the list
-        for day_event in self.switch_events:
-            if day_event["Date"] == event_date:
-                # If we found today's date, append the event to today's events
-                day_event["Events"].append({
-                    "Time": DateHelper.now().time(),
-                    "Switch": switch,
-                    "Schedule": schedule_name,
-                    "Input": input_name,
-                    "Webhook": webhook_state,
-                    "State": state
-                })
-                return
-
-        # If we didn't find today's date, create a new entry
-        event = {
-            "Date": event_date,
-            "Events": [
-                {
-                    "Time": DateHelper.now().time(),
-                    "Switch": switch,
-                    "Schedule": schedule_name,
-                    "Input": input_name,
-                    "Webhook": webhook_state,
-                    "State": state
+                return {
+                    "state": "ON", "event_idx": idx, "on_time": on_time, "off_time": off_time,
+                    "next_change": off_time,
                 }
-            ]
-        }
-        self.switch_events.append(event)
 
-    def _parse_time(self, time_str, offset_minutes, schedule_name, event_index, mode) -> dt.time:
-        """Parse a time string and apply any random offset if specified. Exits if the time string is invalid.
+        # Determine next ON time
+        next_on = self._find_next_on_time(schedule, now, weekday_str)
+        return {"state": "OFF", "reason": "no matching events", "next_change": next_on}
 
-        The time stings are found in the TurnOn and TurnOff fields of the schedule events in the config file and can be any of these types:
-        - "HH:MM" format (e.g., "14:30")
-        - "dawn" or "dusk" with optional hh:mm offset (e.g., "dawn+00:10" or "dusk-01:30")
+    def _find_next_on_time(self, schedule: dict, now: dt.datetime, weekday_str: str) -> dt.time | None:
+        """Return the next TurnOn time for today's schedule, or None if none found."""
+        candidates = []
+        for event in schedule.get("Events", []):
+            days = event.get("DaysOfWeek", "All")
+            if days != "All" and weekday_str not in [d.strip() for d in days.split(",")]:
+                continue
+            on_time = self._parse_time(event["TurnOn"], event.get("RandomOffset"), schedule["Name"], 0, "On")
+            if on_time and on_time > now.time():
+                candidates.append(on_time)
+        return min(candidates) if candidates else None
+
+    def _print_to_console(self, message: str):
+        """Print a message to the console if PrintToConsole is enabled.
 
         Args:
-            time_str (str): The time string to parse, can be in "HH:MM" format or "dawn" / "dusk" with optional offset.
-            offset_minutes (int): The maximum number of minutes to offset the time randomly.
-            schedule_name (str): The name of the schedule for logging.
-            event_index (int): The index of the event in the schedule.
-            mode (str): The mode, either "On" or "Off".
+            message (str): The message to print.
+        """
+        if self.config.get("General", "PrintToConsole", default=False):
+            print(message)
+
+    @staticmethod
+    def _generate_offset_key(schedule_name: str, event_index: int, mode: str) -> str:
+        today_str = DateHelper.today().isoformat()
+        return f"{today_str}|{schedule_name}|{event_index}|{mode}"
+
+    def _parse_time(self, time_str, offset_minutes, schedule_name, event_index, mode) -> dt.time | None:
+        """Parse a time string (HH:MM, dawn[±HH:MM], dusk[±HH:MM]) and apply random offset.
 
         Returns:
-            time: The parsed time with any random offset applied.
+            The resolved time, or None if parsing fails.
         """
         local_tz = dt.datetime.now().astimezone().tzinfo
 
         if not self.dusk_dawn:
-            self.logger.log_fatal_error(f"Dawn/Dusk times have not been set for schedule '{schedule_name}', event {event_index} ({mode})")
+            self.logger.log_fatal_error(f"Dawn/Dusk times not set for schedule '{schedule_name}', event {event_index}")
+            return None
 
-        # Check for dawn/dusk with optional offset
         if time_str.lower().startswith(("dawn", "dusk")):
-            # Extract base time type and any offset
             if time_str.lower().startswith("dawn"):
                 base_time = self.dusk_dawn["dawn"]
-                offset_part = time_str[4:]  # Everything after "dawn"
-            else:  # dusk
+                offset_part = time_str[4:]
+            else:
                 base_time = self.dusk_dawn["dusk"]
-                offset_part = time_str[4:]  # Everything after "dusk"
+                offset_part = time_str[4:]
 
-            # Parse any dawn/dusk time offset (e.g., "+00:10" or "-01:30")
             if offset_part:
                 try:
-                    # Match pattern like "+00:10" or "-01:30"
                     match = re.match(r"^([+-])(\d{2}):(\d{2})$", offset_part)
                     if match:
                         sign, hours, minutes = match.groups()
                         total_minutes = int(hours) * 60 + int(minutes)
                         if sign == "-":
                             total_minutes = -total_minutes
-
-                        # Apply the offset to base_time
                         base_datetime = dt.datetime.combine(DateHelper.today(), base_time)
-                        adjusted_datetime = base_datetime + dt.timedelta(minutes=total_minutes)
-                        base_time = adjusted_datetime.time()
+                        base_time = (base_datetime + dt.timedelta(minutes=total_minutes)).time()
                     else:
-                        self.logger.log_fatal_error(f"Invalid dawn/dusk offset format for the schedule '{schedule_name}', time entry '{time_str}'. Use format like 'Dawn+00:10' or 'Dusk-01:30'")
+                        self.logger.log_fatal_error(f"Invalid dawn/dusk offset in '{schedule_name}': '{time_str}'")
+                        return None
                 except (ValueError, TypeError, OSError):
-                    self.logger.log_fatal_error(f"Invalid dawn/dusk offset format for the schedule '{schedule_name}', time entry '{time_str}'. Use format like 'Dawn+00:10' or 'Dusk-01:30'")
+                    self.logger.log_fatal_error(f"Invalid dawn/dusk offset in '{schedule_name}': '{time_str}'")
+                    return None
         else:
             try:
                 base_time = dt.datetime.strptime(time_str, "%H:%M").replace(tzinfo=local_tz).time()
             except ValueError:
-                self.logger.log_fatal_error(f"Invalid time format for the schedule '{schedule_name}', time entry '{time_str}'. Use format like 'HH:MM'")
+                self.logger.log_fatal_error(f"Invalid time format in '{schedule_name}': '{time_str}'")
+                return None
 
         if offset_minutes:
             key = self._generate_offset_key(schedule_name, event_index, mode)
             if key not in self.offset_cache:
-                delta = random.randint(-offset_minutes, offset_minutes)
-                self.offset_cache[key] = delta
+                self.offset_cache[key] = random.randint(-offset_minutes, offset_minutes)
             return (dt.datetime.combine(DateHelper.today(), base_time) + dt.timedelta(minutes=self.offset_cache[key])).time()
-            # return dt.datetime.strptime(offset_time, "%H:%M:%S").replace(tzinfo=local_tz).time()
         return base_time
 
-    def ping_heatbeat(self, is_fail: bool | None = None) -> bool:
-        """Ping the heartbeat URL to check if the service is available.
+    def _record_switch_event(self, switch: str, state: str, schedule_name: str | None = None, input_name: str | None = None, webhook_state: str | None = None):
+        event_date = DateHelper.today()
+        for day_event in self.switch_events:
+            if day_event["Date"] == event_date:
+                day_event["Events"].append({
+                    "Time": DateHelper.now().time(),
+                    "Switch": switch,
+                    "Schedule": schedule_name,
+                    "Input": input_name,
+                    "Webhook": webhook_state,
+                    "State": state,
+                })
+                return
+        self.switch_events.append({
+            "Date": event_date,
+            "Events": [{
+                "Time": DateHelper.now().time(),
+                "Switch": switch,
+                "Schedule": schedule_name,
+                "Input": input_name,
+                "Webhook": webhook_state,
+                "State": state,
+            }],
+        })
 
-        Args:
-            is_fail (bool, optional): If True, the heartbeat will be considered a failure.
-
-        Returns:
-            bool: True if the heartbeat URL is reachable, False otherwise.
-        """
+    def _ping_heartbeat(self) -> bool:
         heartbeat_url = self.config.get("HeartbeatMonitor", "WebsiteURL")
         timeout = self.config.get("HeartbeatMonitor", "HeartbeatTimeout", default=10)
-
         if heartbeat_url is None:
-            self.logger.log_message("Heartbeat URL not configured - skipping sending a heatbeat.", "debug")
+            self.logger.log_message("Heartbeat URL not configured - skipping.", "debug")
             return True
-        assert isinstance(heartbeat_url, str), "Heartbeat URL must be a string"
-
-        if is_fail:
-            heartbeat_url += "/fail"
-
+        assert isinstance(heartbeat_url, str)
         try:
             response = requests.get(heartbeat_url, timeout=timeout)  # type: ignore[call-arg]
         except requests.exceptions.Timeout as e:
-            self.logger.log_message(f"Timeout making Heartbeat ping: {e}", "error")
+            self.logger.log_message(f"Heartbeat timeout: {e}", "error")
             return False
         except requests.RequestException as e:
-            self.logger.log_message(f"Heartbeat ping failed: {e}", "error")
+            self.logger.log_message(f"Heartbeat failed: {e}", "error")
             return False
-        else:
-            if response.status_code == 200:
-                self.logger.log_message("Heartbeat ping successful.", "debug")
-                return True
-            self.logger.log_message(f"Heartbeat ping failed with status code: {response.status_code}", "error")
-            return False
+        if response.status_code == 200:
+            self.logger.log_message("Heartbeat ping successful.", "debug")
+            return True
+        self.logger.log_message(f"Heartbeat failed with status {response.status_code}", "error")
+        return False
 
-    def run(self):
-        """Run the controller, continuously evaluating switch states and checking for configuration changes."""
-        assert isinstance(self.check_interval, int), "CheckInterval must be an integer"
-        assert self.check_interval > 0, "CheckInterval must be a positive integer"
-
-        while True:
-            config_timestamp = self.config.check_for_config_changes(self.config_last_check)
-            if config_timestamp:
-                self.reload_config()
-
-            # To DO: Call function to summarise how each schedule evaluates
-            self.summarise_schedule_evaluations()
-            self.evaluate_switch_states()
-            self.change_switch_states()
-            self.summarise_switch_states()
-            self._save_state()  # Save the latest state to the file including any switch change events
-            self.wake_event.wait(timeout=self.check_interval)
-            # Clear the event so future waits block again
-            if self.wake_event.is_set():
-
-                # We were woken by a webhook call
-                while True:
-                    event = self.smart_device_control.pull_webhook_event()
-                    if not event:
-                        break
-                    event_name = event.get("Event")
-                    if event_name in {"input.toggle_on", "input.toggle_off"}:
-                        self.change_switch_states(event)
-                self.wake_event.clear()
-            self.ping_heatbeat()
-
-            # Trim the logfile if needed
-            self._trim_logfile_if_needed()
-
-    def reload_config(self):
-        """Apply the updated configureation settings ."""
-        self.logger.log_message("Reloading configuration...", "detailed")
-
+    # Keep public ping_heatbeat name for backward compatibility with main.py error handler
+    def ping_heatbeat(self, is_fail: bool | None = None) -> bool:
+        heartbeat_url = self.config.get("HeartbeatMonitor", "WebsiteURL")
+        if heartbeat_url is None:
+            return True
+        assert isinstance(heartbeat_url, str)
+        if is_fail:
+            heartbeat_url += "/fail"
+        timeout = self.config.get("HeartbeatMonitor", "HeartbeatTimeout", default=10)
         try:
-            # First update the logger
-            logger_settings = self.config.get_logger_settings()
-            self.logger.initialise_settings(logger_settings)
-
-            # Then email settings
-            email_settings = self.config.get_email_settings()
-            if email_settings:
-                self.logger.register_email_settings(email_settings)
-
-            # And finally reinitialise the smart devices
-            smart_switch_settings = self.config.get("SCSmartDevices")
-            if smart_switch_settings is None:
-                self.logger.log_fatal_error("No smart device settings found in the configuration file.")
-                return
-            assert isinstance(smart_switch_settings, dict)
-            self.smart_device_control.initialize_settings(device_settings=smart_switch_settings, refresh_status=True)
-
-        except RuntimeError as e:
-            self.logger.log_fatal_error(f"Error reloading and applying configuration changes: {e}")
-            return
-        else:
-            # Finally, re-initialise ourselves
-            self._initialise()
-            self.config_last_check = DateHelper.now()
+            response = requests.get(heartbeat_url, timeout=timeout)  # type: ignore[call-arg]
+            return response.status_code == 200  # noqa: TRY300
+        except requests.RequestException:
+            return False
 
     def _trim_logfile_if_needed(self) -> None:
-        """Trim the logfile if needed based on time interval."""
         if not self.logger_last_trim or (DateHelper.now() - self.logger_last_trim) >= TRIM_LOGFILE_INTERVAL:
             self.logger.trim_logfile()
             self.logger_last_trim = DateHelper.now()
             self.logger.log_message("Logfile trimmed.", "debug")
+
+
+# ── Module helpers ─────────────────────────────────────────────────────────────
+
+def _make_id(name: str) -> str:
+    """Convert a display name to a URL-safe lowercase identifier.
+
+    Returns:
+        Lowercase string with non-alphanumeric characters replaced by hyphens.
+    """
+    return re.sub(r"[^a-z0-9_-]", "-", name.lower()).strip("-")
+
+
+def _fmt_time(t: dt.time | None) -> str:
+    if t is None:
+        return ""
+    return t.strftime("%H:%M")
