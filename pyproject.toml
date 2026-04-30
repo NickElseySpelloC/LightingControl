@@ -31,5 +31,3 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 
-[tool.uv.sources]
-sc-smart-device = { path = "../sc-smart-device", editable = true }
