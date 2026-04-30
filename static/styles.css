@@ -17,6 +17,9 @@ header {
   color: #e0e0e0;
   padding: 0.75rem 1.25rem;
   margin-bottom: 1rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
 }
 
 header h1 {
@@ -24,6 +27,19 @@ header h1 {
   font-size: 1.2rem;
   font-weight: 600;
   letter-spacing: 0.03em;
+}
+
+#clock {
+  font-size: 1rem;
+  font-variant-numeric: tabular-nums;
+  color: #b6c6de;
+  letter-spacing: 0.05em;
+}
+
+#page-footer {
+  margin: 1.5rem 1rem 0.5rem;
+  font-size: 0.8rem;
+  color: #aaa;
 }
 
 /* ── Cards ─────────────────────────────────────────────────────────────────── */
@@ -70,7 +86,13 @@ header h1 {
   width: 100%;
   border-collapse: collapse;
   font-size: 0.88rem;
+  table-layout: fixed;
 }
+
+.col-name   { width: 35%; }
+.col-state  { width: 14%; }
+.col-mode   { width: 32%; }
+.col-status { width: 19%; }
 
 .switch-table thead th {
   text-align: left;

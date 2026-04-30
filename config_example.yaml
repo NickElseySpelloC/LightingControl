@@ -7,6 +7,16 @@ General:
   CheckInterval: 60
 
 
+# Configure the web interface for the LightingControl utility. 
+# This is optional but allows you to view the status of the lights and schedules from a web browser. 
+# You can also use this to control the lights manually from the web interface.
+Website:
+  Enable: True
+  HostingIP: 0.0.0.0
+  Port: 8080
+  PageAutoRefresh: 30
+
+
 # Use this section to configure your Shelly devices used to control the lights
 # See this page for more information: https://nickelseyspelloc.github.io/sc-smart-device/
 SCSmartDevices:

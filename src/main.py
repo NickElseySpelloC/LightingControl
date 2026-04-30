@@ -13,6 +13,7 @@ from sc_smart_device import SCSmartDevice, SmartDeviceWorker, smart_devices_vali
 
 from config_schemas import ConfigSchema
 from controller import LightingController
+from heartbeat import report_fatal
 from thread_manager import RestartPolicy, ThreadManager
 from webapp import create_asgi_app, serve_asgi_blocking
 
@@ -163,7 +164,7 @@ def main():  # noqa: PLR0914, PLR0915
         logger.log_fatal_error(f"Fatal error at startup: {e}")
         sys.exit(1)
 
-    tm = ThreadManager(logger, global_stop=stop_event)
+    tm = ThreadManager(logger, global_stop=stop_event, before_exit=lambda: report_fatal(config))
 
     tm.add(
         name="smart device",
@@ -193,6 +194,7 @@ def main():  # noqa: PLR0914, PLR0915
         while not stop_event.is_set():
             if tm.any_crashed():
                 logger.log_fatal_error("A managed thread crashed. Initiating shutdown.", report_stack=False)
+                report_fatal(config)
                 stop_event.set()
                 wake_event.set()
                 break

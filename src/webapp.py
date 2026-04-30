@@ -132,12 +132,19 @@ def _register_routes(
         if not snapshot:
             return HTMLResponse("No data available yet.", status_code=503)
 
+        refresh_raw = config.get("Website", "PageAutoRefresh", default=60)
+        try:
+            refresh_seconds = int(refresh_raw or 0)
+        except (TypeError, ValueError):
+            refresh_seconds = 60
+
         return templates.TemplateResponse(
             request,
             "index.html",
             {
                 "app_label": config.get("General", "AppName", default="LightingControl"),
                 "groups": snapshot.get("groups", {}),
+                "page_auto_refresh": refresh_seconds,
             },
         )
 

@@ -40,6 +40,16 @@ General:
   CheckInterval: 60
 
 
+# Configure the web interface for the LightingControl utility. 
+# This is optional but allows you to view the status of the lights and schedules from a web browser. 
+# You can also use this to control the lights manually from the web interface.
+Website:
+  Enable: True
+  HostingIP: 0.0.0.0
+  Port: 8080
+  PageAutoRefresh: 30
+
+
 # Use this section to configure your Shelly devices used to control the lights
 # See this page for more information: https://nickelseyspelloc.github.io/sc-smart-device/
 SCSmartDevices:
@@ -183,6 +193,17 @@ HeartbeatMonitor:
 | WebsiteBaseURL | If you have the PowerControllerViewer web app installed and running (see page 11), then enter the URL for the home page here. Assuming this is on the same machine as this installation, this will typically be http://127.0.0.1:8000. This app uses this URL to pass device state information to the web site. |
 | WebsiteAccessKey | If you have configured an access key for the PowerControllerViewer, configure it here. Alternatively, set the VIEWER_ACCESS_KEY environment variable. |
 | WebsiteTimeout | How long to wait for a reponse from the PowerControllerViewer when posting state information. |
+
+### Section: Website
+
+Configure the web interface for the LightingControl utility. This is optional but allows you to view the status of the lights and schedules from a web browser. You can also use this to control the lights manually from the web interface.
+
+| Parameter | Description | 
+|:--|:--|
+| Enable | Set to True to enable the web app. |
+| HostingIP | IP to listen on. Set to 0.0.0.0 to enable all network interfaces on the host. |
+| Port | Port to listen on. |
+| PageAutoRefresh | Do a full refresh of the webpage (to pick up and configuration changes) every X seconds. |
 
 ### Section: SCSmartDevices
 

@@ -99,10 +99,17 @@ class ManagedThread:
 
 
 class ThreadManager:
-    def __init__(self, logger: Any, global_stop: threading.Event | None = None, exit_on_fatal: bool = True):  # NEW: exit_on_fatal parameter
+    def __init__(
+        self,
+        logger: Any,
+        global_stop: threading.Event | None = None,
+        exit_on_fatal: bool = True,
+        before_exit: Callable[[], None] | None = None,
+    ):
         self.logger = logger
         self.global_stop = global_stop or threading.Event()
-        self.exit_on_fatal = exit_on_fatal  # NEW
+        self.exit_on_fatal = exit_on_fatal
+        self.before_exit = before_exit
         self._threads: list[ManagedThread] = []
         self._lock = threading.Lock()
 
@@ -130,17 +137,14 @@ class ThreadManager:
             self._threads.append(mt)
         return mt
 
-    # NEW: fatal crash handler
     def _handle_fatal_crash(self, thread_name: str):
         """Called when a thread crashes fatally (no restart or max restarts exceeded)."""
-        # Signal all threads to stop
         self.stop_all()
-
-        # Give threads a moment to exit gracefully
         time.sleep(2.0)
-
-        # Force exit
-        self.logger.log_fatal_error(f"Thread [{thread_name}] crashed fatally. Shutting down application.", report_stack=True)
+        # self.logger.log_fatal_error(f"Thread [{thread_name}] crashed fatally. Shutting down application.", report_stack=True, exit_app=False)
+        self.logger.log_fatal_error(f"Thread [{thread_name}] crashed fatally. Shutting down application.", report_stack=True, exit_app=False)
+        if self.before_exit:
+            self.before_exit()
         os._exit(1)
 
     def start_all(self):

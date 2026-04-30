@@ -8,7 +8,6 @@ from collections.abc import Callable
 from pathlib import Path
 from threading import Event, RLock
 
-import requests
 from sc_foundation import (
     DateHelper,
     JSONEncoder,
@@ -24,6 +23,7 @@ from sc_smart_device import (
 )
 
 from enumerations import AppMode, StateReasonOff, StateReasonOn, SystemState
+from heartbeat import report_healthy
 from post_state_to_web_viewer import post_state_to_web_viewer
 
 SCHEMA_VERSION = 2  # Version of the system_state schema we expect
@@ -67,6 +67,11 @@ class LightingController:
     # ── Public API ────────────────────────────────────────────────────────────
 
     def set_webapp_notifier(self, notify: Callable[[], None] | None) -> None:
+        """Set the webapp notifier callback. The webapp will call this to provide a callback that triggers a WS broadcast when notify() is called.
+
+        Args:
+            notify: A callable that takes no arguments and returns None. The controller will call this to trigger a webapp update when state changes. If None, disables notifications.
+        """
         self._webapp_notify = notify
 
     def set_group_mode(self, group_name: str, mode: AppMode) -> bool:
@@ -75,6 +80,10 @@ class LightingController:
         When a group mode is set to ON or OFF, all member switch modes are
         set to match and disabled. When reverted to AUTO, member switches are
         also set to AUTO.
+
+        Args:
+            group_name: The name of the group to update.
+            mode: The AppMode to set for the group.
 
         Returns:
             True if the group was found.
@@ -89,12 +98,17 @@ class LightingController:
                 if sw is not None:
                     sw["AppMode"] = mode
         self._notify_webapp()
+        self.wake_event.set()
         return True
 
     def set_switch_mode(self, switch_name: str, mode: AppMode) -> bool:
         """Set the webapp override mode for an individual switch. Thread-safe.
 
         Only has effect when the switch's group is in AUTO mode.
+
+        Args:
+            switch_name: The name of the switch to update.
+            mode: The AppMode to set for the switch.
 
         Returns:
             True if the switch was found.
@@ -108,18 +122,39 @@ class LightingController:
                 return False  # Group override takes precedence; client should not allow this
             sw["AppMode"] = mode
         self._notify_webapp()
+        self.wake_event.set()
         return True
 
     def is_valid_group(self, group_name: str) -> bool:
+        """Check if a group name is valid. Thread-safe.
+
+        Args:
+            group_name: The name of the group to check.
+
+        Returns:
+            True if the group name is valid, False otherwise.
+        """
         with self._state_lock:
             return self._find_group(group_name) is not None
 
     def is_valid_switch(self, switch_name: str) -> bool:
+        """Check if a switch name is valid. Thread-safe.
+
+        Args:
+            switch_name: The name of the switch to check.
+
+        Returns:
+            True if the switch name is valid, False otherwise.
+        """
         with self._state_lock:
             return self._find_switch_state(switch_name) is not None
 
     def get_webapp_data(self) -> dict:
-        """Return a snapshot of the current state for the webapp. Thread-safe."""
+        """Return a snapshot of the current state for the webapp. Thread-safe.
+
+        Returns:
+            A dictionary representing the current state, including groups and switches with their modes and states.
+        """
         with self._state_lock:
             groups_out = {}
             for group in self.groups:
@@ -168,7 +203,11 @@ class LightingController:
         self.logger.log_message("Lighting Controller initialised successfully.", "debug")
 
     def _get_dusk_dawn_times(self) -> dict:
-        """Return dawn/dusk times from device location or config."""
+        """Get the dawn and dusk times based on the location returned from the specified shelly switch or the manually configured location configuration.
+
+        Returns:
+            dict: A dictionary with 'dawn' and 'dusk' times.
+        """
         name = "LightingControl"  # noqa: F841
         loc_conf = self.config.get("Location", default={})
         assert isinstance(loc_conf, dict), "Location configuration must be a dictionary"
@@ -549,6 +588,9 @@ class LightingController:
     def _drain_webhook_events_for(self, input_name: str | None) -> str | None:
         """Pull all pending webhook events and return the last relevant one for input_name.
 
+        Args:
+            input_name: The name of the input to check for events.
+
         Returns:
             "ON", "OFF", or None if no relevant event was found.
         """
@@ -565,19 +607,24 @@ class LightingController:
                     last_event = "OFF"
         return last_event
 
-    def _change_switch_states(self):
-        """Apply any required physical switch changes based on the evaluated desired states.
+    def _refresh_device_status(self) -> bool:
+        """Refresh all device statuses via the worker.
 
-        Submits a REFRESH_STATUS to get fresh device state, reads back via the
-        view, then submits CHANGE_OUTPUT requests for any switch whose physical
-        state differs from the desired state.
+        Returns:
+            bool: True on success, False on failure.
         """
-        # Refresh device status via the worker
         req_id = self.smart_device_worker.request_refresh_status()
         if not self.smart_device_worker.wait_for_result(req_id, timeout=30.0):
-            self.logger.log_message("Device status refresh timed out; skipping switch changes.", "error")
-            return
+            self.logger.log_message("Device status refresh timed out.", "error")
+            return False
+        return True
 
+    def _change_switch_states(self):
+        """Apply CHANGE_OUTPUT requests for any switch whose physical state differs from desired.
+
+        Assumes _refresh_device_status() has already been called this tick so
+        the view reflects current hardware state.
+        """
         view = self.smart_device_worker.get_latest_status()
 
         with self._state_lock:
@@ -626,7 +673,11 @@ class LightingController:
     # ── Main loop ─────────────────────────────────────────────────────────────
 
     def run(self, stop_event: Event | None = None):
-        """Run the controller loop until stop_event is set."""
+        """Run the controller loop until stop_event is set.
+
+        Args:
+            stop_event: Optional threading.Event to signal when to stop the loop. If None, runs indefinitely until externally interrupted.
+        """
         assert isinstance(self.check_interval, int), "CheckInterval must be an integer"
         assert self.check_interval > 0, "CheckInterval must be a positive integer"
 
@@ -640,6 +691,10 @@ class LightingController:
                 self._reload_config()
 
             self._summarise_schedule_evaluations()
+            if not self._refresh_device_status():
+                self.wake_event.clear()
+                self.wake_event.wait(timeout=self.check_interval)
+                continue
             self._evaluate_switch_states()
             self._change_switch_states()
             self._summarise_switch_states()
@@ -649,7 +704,8 @@ class LightingController:
             self.wake_event.clear()
             self.wake_event.wait(timeout=self.check_interval)
 
-            self._ping_heartbeat()
+            if not report_healthy(self.config):
+                self.logger.log_message("Heartbeat ping failed.", "error")
             self._trim_logfile_if_needed()
 
         self.shutdown()
@@ -679,22 +735,47 @@ class LightingController:
     # ── Helpers ───────────────────────────────────────────────────────────────
 
     def _find_group(self, name: str) -> dict | None:
+        """Find a group by name. Thread-safe if called with _state_lock held.
+
+        Args:
+            name: The name of the group to find.
+
+        Returns:
+            The group dict if found, or None if not found.
+        """
         for g in self.groups:
             if g["Name"] == name:
                 return g
         return None
 
     def _find_switch_state(self, switch_name: str) -> dict | None:
+        """Find a switch state by switch name. Thread-safe if called with _state_lock held.
+
+        Args:
+            switch_name: The name of the switch to find.
+
+        Returns:
+            The switch state dict if found, or None if not found.
+        """
         for sw in self.switch_states:
             if sw["Switch"] == switch_name:
                 return sw
         return None
 
     def _notify_webapp(self):
+        """Notify the web application of state changes."""
         if self._webapp_notify:
             self._webapp_notify()
 
     def _get_schedule_by_name(self, name: str) -> dict | None:
+        """Get a schedule by name.
+
+        Args:
+            name: The name of the schedule to find.
+
+        Returns:
+            The schedule dict if found, or None if not found.
+        """
         schedules = self.config.get("Schedules", default=[])
         if not isinstance(schedules, list):
             return None
@@ -704,6 +785,7 @@ class LightingController:
         return None
 
     def _summarise_schedule_evaluations(self):
+        """Summarise the evaluations of all schedules."""
         if not self._schedule_map:
             return
         unique_schedules = set(self._schedule_map.values())
@@ -722,6 +804,7 @@ class LightingController:
             self.logger.log_message(f"Schedule evaluations - {', '.join(evaluations)}", "debug")
 
     def _summarise_switch_states(self):
+        """Summarise the current states of all switches."""
         if not self.switch_states:
             return
         with self._state_lock:
@@ -735,6 +818,11 @@ class LightingController:
 
     def _evaluate_schedule_with_detail(self, schedule: dict, now: dt.datetime, weekday_str: str) -> dict:
         """Evaluate a schedule and return state details including next change time.
+
+        Args:
+            schedule: The schedule dict to evaluate.
+            now: The current datetime.
+            weekday_str: The current weekday as a string (e.g. "Mon").
 
         Returns:
             Dict with keys: state ("ON"/"OFF"), next_change (dt.time | None), reason (str | None).
@@ -779,7 +867,16 @@ class LightingController:
         return {"state": "OFF", "reason": "no matching events", "next_change": next_on}
 
     def _find_next_on_time(self, schedule: dict, now: dt.datetime, weekday_str: str) -> dt.time | None:
-        """Return the next TurnOn time for today's schedule, or None if none found."""
+        """Return the next TurnOn time for today's schedule, or None if none found.
+
+        Args:
+            schedule: The schedule dict to evaluate.
+            now: The current datetime.
+            weekday_str: The current weekday as a string (e.g. "Mon").
+
+        Returns:
+            The next TurnOn time as a datetime.time object, or None if no future ON events are found for today.
+        """
         candidates = []
         for event in schedule.get("Events", []):
             days = event.get("DaysOfWeek", "All")
@@ -801,11 +898,28 @@ class LightingController:
 
     @staticmethod
     def _generate_offset_key(schedule_name: str, event_index: int, mode: str) -> str:
+        """Generate a unique key for caching random offsets based on schedule, event, and mode.
+
+        Args:
+            schedule_name: The name of the schedule.
+            event_index: The index of the event within the schedule.
+            mode: "On" or "Off" to differentiate between turn-on and turn-off offsets.
+
+        Returns:
+            A string key for caching the random offset.
+        """
         today_str = DateHelper.today().isoformat()
         return f"{today_str}|{schedule_name}|{event_index}|{mode}"
 
     def _parse_time(self, time_str, offset_minutes, schedule_name, event_index, mode) -> dt.time | None:
         """Parse a time string (HH:MM, dawn[±HH:MM], dusk[±HH:MM]) and apply random offset.
+
+        Args:
+            time_str: The time string to parse.
+            offset_minutes: The maximum random offset in minutes (int or None).
+            schedule_name: The name of the schedule (for logging).
+            event_index: The index of the event within the schedule (for logging).
+            mode: "On" or "Off" to differentiate between turn-on and turn-off times (for logging).
 
         Returns:
             The resolved time, or None if parsing fails.
@@ -855,6 +969,15 @@ class LightingController:
         return base_time
 
     def _record_switch_event(self, switch: str, state: str, schedule_name: str | None = None, input_name: str | None = None, webhook_state: str | None = None):
+        """Record a switch state change event in the switch_events log.
+
+        Args:
+            switch: The name of the switch that changed.
+            state: The new state of the switch ("ON" or "OFF").
+            schedule_name: The name of the schedule that triggered the change, if applicable.
+            input_name: The name of the input that triggered the change, if applicable.
+            webhook_state: The state from a webhook event that triggered the change, if applicable.
+        """
         event_date = DateHelper.today()
         for day_event in self.switch_events:
             if day_event["Date"] == event_date:
@@ -879,43 +1002,8 @@ class LightingController:
             }],
         })
 
-    def _ping_heartbeat(self) -> bool:
-        heartbeat_url = self.config.get("HeartbeatMonitor", "WebsiteURL")
-        timeout = self.config.get("HeartbeatMonitor", "HeartbeatTimeout", default=10)
-        if heartbeat_url is None:
-            self.logger.log_message("Heartbeat URL not configured - skipping.", "debug")
-            return True
-        assert isinstance(heartbeat_url, str)
-        try:
-            response = requests.get(heartbeat_url, timeout=timeout)  # type: ignore[call-arg]
-        except requests.exceptions.Timeout as e:
-            self.logger.log_message(f"Heartbeat timeout: {e}", "error")
-            return False
-        except requests.RequestException as e:
-            self.logger.log_message(f"Heartbeat failed: {e}", "error")
-            return False
-        if response.status_code == 200:
-            self.logger.log_message("Heartbeat ping successful.", "debug")
-            return True
-        self.logger.log_message(f"Heartbeat failed with status {response.status_code}", "error")
-        return False
-
-    # Keep public ping_heatbeat name for backward compatibility with main.py error handler
-    def ping_heatbeat(self, is_fail: bool | None = None) -> bool:
-        heartbeat_url = self.config.get("HeartbeatMonitor", "WebsiteURL")
-        if heartbeat_url is None:
-            return True
-        assert isinstance(heartbeat_url, str)
-        if is_fail:
-            heartbeat_url += "/fail"
-        timeout = self.config.get("HeartbeatMonitor", "HeartbeatTimeout", default=10)
-        try:
-            response = requests.get(heartbeat_url, timeout=timeout)  # type: ignore[call-arg]
-            return response.status_code == 200  # noqa: TRY300
-        except requests.RequestException:
-            return False
-
     def _trim_logfile_if_needed(self) -> None:
+        """Trim the logfile if the configured interval has passed since the last trim."""
         if not self.logger_last_trim or (DateHelper.now() - self.logger_last_trim) >= TRIM_LOGFILE_INTERVAL:
             self.logger.trim_logfile()
             self.logger_last_trim = DateHelper.now()
@@ -934,6 +1022,14 @@ def _make_id(name: str) -> str:
 
 
 def _fmt_time(t: dt.time | None) -> str:
+    """Format a time object as HH:MM, or return empty string if None.
+
+    Args:
+        t: The time object to format.
+
+    Returns:
+        A string representing the time in HH:MM format, or an empty string if t is None.
+    """
     if t is None:
         return ""
     return t.strftime("%H:%M")
