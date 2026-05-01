@@ -8,13 +8,18 @@ from pathlib import Path
 from threading import Event
 
 from mergedeep import merge
-from sc_foundation import SCCommon, SCConfigManager, SCLogger
+from sc_foundation import (
+    RestartPolicy,
+    SCCommon,
+    SCConfigManager,
+    SCLogger,
+    ThreadManager,
+)
 from sc_smart_device import SCSmartDevice, SmartDeviceWorker, smart_devices_validator
 
 from config_schemas import ConfigSchema
 from controller import LightingController
 from heartbeat import report_fatal
-from thread_manager import RestartPolicy, ThreadManager
 from webapp import create_asgi_app, serve_asgi_blocking
 
 CONFIG_FILE = "config.yaml"

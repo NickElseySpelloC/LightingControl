@@ -596,7 +596,7 @@ class LightingController:
         """
         last_event = None
         while True:
-            event = self.smart_device_worker._smart_device.pull_webhook_event()  # noqa: SLF001
+            event = self.smart_device_worker.pull_webhook_event()
             if not event:
                 break
             event_input = event.get("Component", {}).get("Name")
