@@ -239,3 +239,25 @@ header h1 {
     font-size: 0.82rem;
   }
 }
+
+@media (max-width: 480px) {
+  .card {
+    margin: 0.4rem 0.4rem;
+  }
+
+  .group-meta {
+    font-size: 0.75rem;
+  }
+
+  /* Hide Status column */
+  .switch-table th:nth-child(4),
+  .switch-status {
+    display: none;
+  }
+
+  /* Redistribute widths across the 3 remaining columns */
+  .col-status { width: 0; }
+  .col-name   { width: 42%; }
+  .col-state  { width: 16%; }
+  .col-mode   { width: 42%; }
+}
