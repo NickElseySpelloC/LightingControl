@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 from threading import Event
 
+from dotenv import load_dotenv
 from mergedeep import merge
 from sc_foundation import (
     RestartPolicy,
@@ -95,6 +96,7 @@ Examples:
 
 def main():  # noqa: PLR0914, PLR0915
     """Main entry point."""
+    load_dotenv()  # Load .env file if present (no-op if absent)
     print(f"Starting LightingControl on {platform.system()}")
 
     wake_event = Event()   # Wakes the controller loop from sleep (e.g. on webhook)
@@ -165,6 +167,13 @@ def main():  # noqa: PLR0914, PLR0915
         if webapp_enabled:
             asgi_app, web_notifier = create_asgi_app(controller, config, logger)
             controller.set_webapp_notifier(web_notifier.notify)
+            _expected_key = os.environ.get("WEBAPP_ACCESS_KEY")
+            if not _expected_key:
+                _expected_key = config.get("Website", "AccessKey")
+            if _expected_key and str(_expected_key).strip():
+                logger.log_message("Web app access key protection is enabled.", "summary")
+            else:
+                logger.log_message("Web app is accessible without an access key.", "summary")
     except (RuntimeError, TypeError) as e:
         logger.log_fatal_error(f"Fatal error at startup: {e}")
         sys.exit(1)
