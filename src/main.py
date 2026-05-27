@@ -20,7 +20,6 @@ from sc_smart_device import SCSmartDevice, SmartDeviceWorker, smart_devices_vali
 
 from config_schemas import ConfigSchema
 from controller import LightingController
-from heartbeat import report_fatal
 from webapp import create_asgi_app, serve_asgi_blocking
 
 CONFIG_FILE = "config.yaml"
@@ -94,7 +93,12 @@ Examples:
     }
 
 
-def main():  # noqa: PLR0914, PLR0915
+def report_fatal_heartbeat(logger) -> None:
+    """Report a fatal error to the heartbeat monitor and log it."""
+    logger.ping_heartbeat(is_fail=True)
+
+
+def main():  # noqa: PLR0912, PLR0914, PLR0915
     """Main entry point."""
     load_dotenv()  # Load .env file if present (no-op if absent)
     print(f"Starting LightingControl on {platform.system()}")
@@ -121,7 +125,8 @@ def main():  # noqa: PLR0914, PLR0915
         sys.exit(1)
 
     try:
-        logger = SCLogger(config.get_logger_settings())
+        heartbeat_config = config.get("HeartbeatMonitor")
+        logger = SCLogger(config.get_logger_settings(), heartbeat_config=heartbeat_config)
     except RuntimeError as e:
         print(f"Logger initialisation error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -167,9 +172,9 @@ def main():  # noqa: PLR0914, PLR0915
         if webapp_enabled:
             asgi_app, web_notifier = create_asgi_app(controller, config, logger)
             controller.set_webapp_notifier(web_notifier.notify)
-            _expected_key = os.environ.get("WEBAPP_ACCESS_KEY")
+            _expected_key = os.environ.get("WEBAPP_ACCESS_KEY")  # noqa: RUF052
             if not _expected_key:
-                _expected_key = config.get("Website", "AccessKey")
+                _expected_key = config.get("Website", "AccessKey")  # noqa: RUF052
             if _expected_key and str(_expected_key).strip():
                 logger.log_message("Web app access key protection is enabled.", "summary")
             else:
@@ -178,7 +183,7 @@ def main():  # noqa: PLR0914, PLR0915
         logger.log_fatal_error(f"Fatal error at startup: {e}")
         sys.exit(1)
 
-    tm = ThreadManager(logger, global_stop=stop_event, before_exit=lambda: report_fatal(config))
+    tm = ThreadManager(logger, global_stop=stop_event, before_exit=lambda: report_fatal_heartbeat(logger))
 
     tm.add(
         name="smart device",
@@ -208,7 +213,7 @@ def main():  # noqa: PLR0914, PLR0915
         while not stop_event.is_set():
             if tm.any_crashed():
                 logger.log_fatal_error("A managed thread crashed. Initiating shutdown.", report_stack=False)
-                report_fatal(config)
+                report_fatal_heartbeat(logger)
                 stop_event.set()
                 wake_event.set()
                 break

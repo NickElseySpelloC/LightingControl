@@ -133,13 +133,6 @@ class ConfigSchema:
                     "MaxDaysSwitchChangeHistory": {"type": "number", "required": False, "nullable": True, "min": 1, "max": 365},
                 },
             },
-            "HeartbeatMonitor": {
-                "type": "dict",
-                "schema": {
-                    "WebsiteURL": {"type": "string", "required": False, "nullable": True},
-                    "HeartbeatTimeout": {"type": "number", "required": False, "nullable": True, "min": 1, "max": 60},
-                },
-            },
             "Website": {
                 "type": "dict",
                 "required": False,

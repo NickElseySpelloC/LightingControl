@@ -23,7 +23,6 @@ from sc_smart_device import (
 )
 
 from enumerations import AppMode, StateReasonOff, StateReasonOn, SystemState
-from heartbeat import report_healthy
 from post_state_to_web_viewer import post_state_to_web_viewer
 
 SCHEMA_VERSION = 2  # Version of the system_state schema we expect
@@ -704,7 +703,7 @@ class LightingController:
             self.wake_event.clear()
             self.wake_event.wait(timeout=self.check_interval)
 
-            if not report_healthy(self.config):
+            if not self.logger.ping_heartbeat():
                 self.logger.log_message("Heartbeat ping failed.", "error")
             self._trim_logfile_if_needed()
 
