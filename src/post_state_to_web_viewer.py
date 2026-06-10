@@ -6,9 +6,10 @@ import requests
 from sc_foundation import JSONEncoder, SCConfigManager, SCLogger
 
 HTTP_STATUS_FORBIDDEN = 403
+HTTP_STATUS_CONNECTION_TIMED_OUT = 522
 
 
-def post_state_to_web_viewer(config: SCConfigManager, logger: SCLogger, system_state: dict) -> None:
+def post_state_to_web_viewer(config: SCConfigManager, logger: SCLogger, system_state: dict) -> None:  # noqa: PLR0912, PLR0915
     """Post the LightingController state to the web server if WebsiteBaseURL is set in config.
 
     Args:
@@ -55,9 +56,11 @@ def post_state_to_web_viewer(config: SCConfigManager, logger: SCLogger, system_s
         except (ValueError, requests.exceptions.JSONDecodeError):
             returned_json = response.text if hasattr(response, "text") else "No response content"  # pyright: ignore[reportOptionalMemberAccess, reportPossiblyUnboundVariable]
         if response.status_code == HTTP_STATUS_FORBIDDEN:  # pyright: ignore[reportOptionalMemberAccess, reportPossiblyUnboundVariable]
-            logger.log_message(f"Access denied ({HTTP_STATUS_FORBIDDEN} Forbidden) when posting to {api_url}. Check your access key or permissions. Error: {e}, Response: {returned_json}", "error")
+            logger.log_message(f"Access denied ({HTTP_STATUS_FORBIDDEN} Forbidden) when posting to {api_url}. Check your access key or permissions. Error: {e}, Response: {str(returned_json)[:1024]}", "error")
+        elif response.status_code == HTTP_STATUS_CONNECTION_TIMED_OUT:  # pyright: ignore[reportOptionalMemberAccess, reportPossiblyUnboundVariable]
+            logger.log_message(f"Web server returned {HTTP_STATUS_CONNECTION_TIMED_OUT} Connection Timed Out when posting to {api_url}. Error: {e}", "warning")
         else:
-            logger.log_message(f"HTTP error saving state to web server at {api_url}: Error: {e}, Response: {returned_json}", "warning")
+            logger.log_message(f"HTTP error saving state to web server at {api_url}: Error: {e}, Response: {str(returned_json)[:1024]}", "warning")
     except requests.exceptions.ConnectionError as e:
         logger.log_message(f"Web server at {api_url} is unavailable. Error: {e}", "warning")
     except requests.exceptions.Timeout as e:
@@ -69,7 +72,7 @@ def post_state_to_web_viewer(config: SCConfigManager, logger: SCLogger, system_s
             returned_json = response.json()  # pyright: ignore[reportOptionalMemberAccess, reportPossiblyUnboundVariable]
         except (ValueError, requests.exceptions.JSONDecodeError, UnboundLocalError):
             returned_json = response.text if hasattr(response, "text") else "No response content"  # pyright: ignore[reportOptionalMemberAccess, reportPossiblyUnboundVariable]
-        logger.log_fatal_error(f"Error saving state to web server at {api_url}: Error: {e}, Response: {returned_json}")
+        logger.log_fatal_error(f"Error saving state to web server at {api_url}: Error: {e}, Response: {str(returned_json)[:1024]}")
     else:
         # Record the time of the last post even if it failed so that we don't keep retrying on errors
         # self.logger.log_message(f"Posted state for {system_state.get('DeviceName')} to {api_url}.", "debug")
