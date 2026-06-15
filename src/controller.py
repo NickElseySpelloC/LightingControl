@@ -248,7 +248,7 @@ class LightingController:
         }
         return return_obj
 
-    def _build_groups_and_maps(self):  # noqa: PLR0912, PLR0914, PLR0915
+    def _build_groups_and_maps(self):  # noqa: PLR0912, PLR0914
         """Build self.groups, self._schedule_map, and self._input_map from config.
 
         Preserves existing AppMode overrides when called during reload.
@@ -481,10 +481,11 @@ class LightingController:
 
     # ── Schedule evaluation ───────────────────────────────────────────────────
 
-    def _evaluate_switch_states(self) -> list:  # noqa: PLR0915
+    def _evaluate_switch_states(self) -> list:  # noqa: PLR0912
         """Evaluate desired state for every switch using the 4-level priority chain.
 
         Priority (highest first):
+          0. Global override (DisableAllSwitches)
           1. Webapp switch override (AppMode.ON / OFF)
           2. Webapp group override
           3. Input switch override
@@ -540,8 +541,13 @@ class LightingController:
                 group_mode = group["AppMode"] if group else AppMode.AUTO
                 switch_mode = state.get("AppMode", AppMode.AUTO)
 
+                # Priority 0: global override (issue 18)
+                if self.config.get("General", "DisableAllSwitches"):
+                    state["SystemState"] = SystemState.GLOBAL_OVERRIDE
+                    state["StateReason"] = StateReasonOff.GLOBAL_OVERRIDE
+                    state["DesiredState"] = "OFF"
                 # Priority 1: webapp switch override
-                if switch_mode == AppMode.ON:
+                elif switch_mode == AppMode.ON:
                     state["SystemState"] = SystemState.WEBAPP_SWITCH_OVERRIDE
                     state["StateReason"] = StateReasonOn.WEBAPP_SWITCH_ON
                     state["DesiredState"] = "ON"
