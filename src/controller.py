@@ -219,7 +219,7 @@ class LightingController:
         }
         return return_obj
 
-    def _build_groups_and_maps(self):  # noqa: PLR0912, PLR0914
+    def _build_groups_and_maps(self):  # noqa: PLR0912, PLR0914, PLR0915
         """Build self.groups, self._schedule_map, and self._input_map from config.
 
         Preserves existing AppMode overrides when called during reload.
@@ -471,7 +471,7 @@ class LightingController:
 
     # ── Schedule evaluation ───────────────────────────────────────────────────
 
-    def _evaluate_switch_states(self) -> list:  # noqa: PLR0912
+    def _evaluate_switch_states(self) -> list:  # noqa: PLR0912, PLR0915
         """Evaluate desired state for every switch using the 4-level priority chain.
 
         Priority (highest first):
