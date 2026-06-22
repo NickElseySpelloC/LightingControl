@@ -22,6 +22,7 @@ class ConfigSchema:
                     "AppName": {"type": "string", "required": False, "nullable": True},
                     "CheckInterval": {"type": "number", "required": False, "nullable": True},
                     "PrintToConsole": {"type": "boolean", "required": False, "nullable": True},
+                    "DisableAllSwitches": {"type": "boolean", "required": False, "nullable": True},
                 },
             },
             "ViewerWebsite": {

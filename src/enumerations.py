@@ -18,6 +18,7 @@ class SystemState(StrEnum):
     WEBAPP_GROUP_OVERRIDE = "Webapp has overridden the group"
     INPUT_OVERRIDE = "Input switch has overridden the schedule"
     DATE_OFF = "DatesOff condition met for today"
+    GLOBAL_OVERRIDE = "All switches are disabled"
 
 
 class StateReasonOn(StrEnum):
@@ -39,3 +40,4 @@ class StateReasonOff(StrEnum):
     DATE_OFF = "DatesOff condition met for today"
     DEVICE_OFFLINE = "Device is offline"
     SHUTDOWN = "System is shutting down"
+    GLOBAL_OVERRIDE = "Disabled in the configuration"
