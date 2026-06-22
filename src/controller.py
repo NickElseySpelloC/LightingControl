@@ -210,37 +210,8 @@ class LightingController:
         name = "LightingControl"  # noqa: F841
         loc_conf = self.config.get("Location", default={})
         assert isinstance(loc_conf, dict), "Location configuration must be a dictionary"
-        tz = lat = lon = None
 
-        shelly_device_name = loc_conf.get("UseShellyDevice")
-        if shelly_device_name:
-            req_id = self.smart_device_worker.request_device_location(shelly_device_name)
-            self.smart_device_worker.wait_for_result(req_id, timeout=15.0)
-            location_info = self.smart_device_worker.get_location_info()
-            shelly_loc = location_info.get(shelly_device_name)
-            if shelly_loc:
-                tz = shelly_loc.get("tz")
-                lat = shelly_loc.get("lat")
-                lon = shelly_loc.get("lon")
-
-        if tz is None:
-            tz = loc_conf.get("Timezone")
-            if "GoogleMapsURL" in loc_conf and loc_conf["GoogleMapsURL"] is not None:
-                url = loc_conf["GoogleMapsURL"]
-                match = re.search(r"@?([-]?\d+\.\d+),([-]?\d+\.\d+)", url)
-                if match:
-                    lat = float(match.group(1))
-                    lon = float(match.group(2))
-            else:
-                lat = loc_conf.get("Latitude")
-                lon = loc_conf.get("Longitude")
-
-        if lat is None or lon is None:
-            self.logger.log_message("Latitude/longitude could not be determined, using 0°N 0°E.", "warning")
-            lat = 0.0
-            lon = 0.0
-
-        astral_info = DateHelper.get_dawn_dusk_times(latitude=lat, longitude=lon, timezone=tz)   # Issue 80
+        astral_info = DateHelper.dawn_dusk_times(loc_conf)   # Issue 80
 
         return_obj = {
             "dawn": astral_info["dawn"].time(),
@@ -430,6 +401,23 @@ class LightingController:
 
             self.offset_cache = state.get("RandomOffsets", {})
             self.switch_events = state.get("SwitchEvents", [])
+
+            # Initialise the group app modes from the saved state
+            saved_groups = state.get("Groups", [])
+            if isinstance(saved_groups, list):
+                for saved_group in saved_groups:
+                    group_name = saved_group.get("Name")
+                    group_mode = saved_group.get("AppMode", AppMode.AUTO)
+                    self.set_group_mode(group_name, group_mode)
+
+            # Now initialise the switch_states from the saved state
+            saved_switches = state.get("SwitchStates", [])
+            if isinstance(saved_switches, list):
+                for saved_switch in saved_switches:
+                    switch_name = saved_switch.get("Switch")
+                    switch_state = saved_switch.get("AppMode", AppMode.AUTO)
+                    self.set_switch_mode(switch_name, switch_state)
+
         except json.JSONDecodeError as e:
             self.logger.log_fatal_error(f"Failed to load state file {self.state_filepath}: {e}")
         else:
@@ -446,6 +434,7 @@ class LightingController:
 
             with self._state_lock:
                 switch_states_copy = copy.deepcopy(self.switch_states)
+                groups_copy = copy.deepcopy(self.groups)
 
             state_data = {
                 "SchemaVersion": SCHEMA_VERSION,
@@ -458,6 +447,7 @@ class LightingController:
                 "Dusk": self.dusk_dawn.get("dusk"),  # type: ignore  # noqa: PGH003
                 "RandomOffsets": self.offset_cache,
                 "SwitchStates": switch_states_copy,
+                "Groups": groups_copy,
                 "Schedules": schedules,
                 "SwitchEvents": self.switch_events,
             }
